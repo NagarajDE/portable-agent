@@ -1,0 +1,4 @@
+# Defaults inherited by any pack whose config declares: inherits: [shared]
+threshold: 18
+max_iters: 4
+default_sql_tool: mock

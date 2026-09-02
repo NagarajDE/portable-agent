@@ -1,0 +1,3 @@
+inherits: [shared]
+name: "DQ – QALS duplicate lots"
+sample_task: "Any duplicate inspection lots in QALS today?"

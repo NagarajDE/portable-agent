@@ -1,0 +1,3 @@
+inherits: [shared]
+name: "Cross-engine parity – SAP HANA vs Snowflake"
+sample_task: "Do MARA/MARC/MBEW row counts match between SAP HANA and Snowflake?"

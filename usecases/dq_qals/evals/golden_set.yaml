@@ -1,0 +1,6 @@
+# Golden question set. Owned in git = portable eval signal that survives migration.
+# expect_contains: substrings the best_answer must include (case-insensitive).
+- question: "Any duplicate inspection lots in QALS today?"
+  expect_contains: ["duplicate", "40001122"]
+- question: "How many QALS lots are duplicated?"
+  expect_contains: ["3", "twice"]

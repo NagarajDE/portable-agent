@@ -1,0 +1,7 @@
+# Verified question -> SQL pairs. YOUR source of truth (git), not Cortex's.
+# Injected into generate.md as few-shot; also the seed you translate into
+# Cortex verified queries / Genie sample queries per platform.
+- question: "Find duplicate inspection lots in QALS"
+  sql: "SELECT PRUEFLOS, COUNT(*) AS N FROM QALS GROUP BY PRUEFLOS HAVING COUNT(*) > 1"
+- question: "How many inspection lots are duplicated today?"
+  sql: "SELECT COUNT(*) FROM (SELECT PRUEFLOS FROM QALS GROUP BY PRUEFLOS HAVING COUNT(*) > 1)"

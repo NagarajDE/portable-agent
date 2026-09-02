@@ -1,0 +1,4 @@
+- question: "Do MARA/MARC/MBEW row counts match between HANA and Snowflake?"
+  expect_contains: ["MARC", "parity"]
+- question: "Which table is out of parity between HANA and Snowflake?"
+  expect_contains: ["MARC", "4,499,998"]

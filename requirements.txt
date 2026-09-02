@@ -1,0 +1,13 @@
+# --- engine core (needed to run locally) ---
+langgraph
+pyyaml
+
+# --- real providers: install only the ones you use ---
+anthropic                    # LLM_PROVIDER=anthropic
+snowflake-snowpark-python    # LLM_PROVIDER=cortex  / SQL_TOOL=cortex
+openai                       # LLM_PROVIDER=databricks (OpenAI-compatible endpoint)
+databricks-sdk               # SQL_TOOL=genie
+
+# --- only needed to DEPLOY on databricks ---
+mlflow
+databricks-agents

@@ -1,0 +1,4 @@
+- question: "Row count of MARA in each engine"
+  sql: "SELECT 'HANA' AS ENGINE, COUNT(*) FROM HANA.MARA UNION ALL SELECT 'SNOWFLAKE', COUNT(*) FROM SF.MARA"
+- question: "Tables out of parity between HANA and Snowflake"
+  sql: "SELECT t.TABLE_NAME, h.N AS HANA_N, s.N AS SF_N FROM h JOIN s USING (TABLE_NAME) WHERE h.N <> s.N"
