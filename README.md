@@ -111,6 +111,24 @@ Docstring atop `engine/platform_databricks/agent.py`: MLflow Models-from-Code
 (`code_paths=["engine","shared","usecases"]`) → Unity Catalog → `agents.deploy()`
 → Databricks App.
 
+
+## Host on Snowflake (SPCS)
+
+`engine/platform_snowflake/` is the SPCS analog of the Databricks shell:
+`agent.py` (FastAPI, `/invoke` + `/healthz`), a `Dockerfile`, and `spec.yaml`.
+
+```
+docker build -t <repo_url>/dq_agent:latest -f engine/platform_snowflake/Dockerfile .
+docker push <repo_url>/dq_agent:latest
+snow spcs compute-pool create dq_pool --family CPU_X64_XS --min-nodes 1 --max-nodes 1 --auto-resume
+snow spcs service create dq_agent --compute-pool dq_pool --spec-path engine/platform_snowflake/spec.yaml
+SHOW ENDPOINTS IN SERVICE dq_agent;   -- the URL to call
+```
+
+Snowflake injects Cortex credentials into the container automatically (no
+secrets to manage). Front it with Streamlit-in-Snowflake for a chat UI, or
+register it as a custom MCP server so Cortex Agents can call it as a tool.
+
 ## Ownership tiers
 
 ```

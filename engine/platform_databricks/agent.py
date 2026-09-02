@@ -32,7 +32,7 @@ from mlflow.models import set_model
 from engine.graph import build_graph, initial_state
 
 
-class DQAgent(ResponsesAgent):
+class PortableAgent(ResponsesAgent):
     def __init__(self):
         self.app = build_graph(os.environ["USE_CASE"])       # portable loop + chosen pack
 
@@ -43,4 +43,4 @@ class DQAgent(ResponsesAgent):
             output=[{"role": "assistant", "content": final["best_answer"]}])
 
 
-set_model(DQAgent())
+set_model(PortableAgent())

@@ -1,0 +1,21 @@
+# SPCS service spec. Snowflake injects SNOWFLAKE_HOST / SNOWFLAKE_ACCOUNT and a
+# short-lived OAuth token at /snowflake/session/token automatically — no secrets
+# to manage for Cortex calls made from inside the container.
+spec:
+  containers:
+    - name: dq-agent
+      image: "<repo_url>/dq_agent:latest"   # from: SHOW IMAGE REPOSITORIES
+      env:
+        - name: USE_CASE
+          value: "dq_qals"
+        - name: LLM_PROVIDER
+          value: "cortex"
+        - name: SQL_TOOL
+          value: "cortex"
+      readinessProbe:
+        port: 8080
+        path: /healthz
+  endpoints:
+    - name: api
+      port: 8080
+      public: true      # false to keep it Snowflake-internal only

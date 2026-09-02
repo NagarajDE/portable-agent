@@ -3,6 +3,10 @@
 Read this before making changes. It captures the architecture decisions and the
 reasoning behind them, so you don't re-litigate them per session.
 
+> For the full narrative — the goal, why the project exists, the concepts we
+> clarified, and the decision log with reasoning — see **`PROJECT_CONTEXT.md`**.
+> This file is the operational spec; that one is the story and the "why".
+
 ## What this is
 
 A LangGraph agent (generate → evaluate → refine, scored against an /N rubric)
@@ -28,6 +32,10 @@ engine/     GENERIC. shared code. touch rarely.
   llm_client.py         LLMClient interface + mock|anthropic|cortex|databricks
   sql_tool.py           SQLTool  interface + mock|cortex-analyst|genie
   platform_databricks/agent.py   the ONLY Databricks-specific file (~25 lines)
+  platform_snowflake/             the ONLY Snowflake-specific files (SPCS)
+    agent.py           FastAPI shell: POST /invoke, GET /healthz
+    Dockerfile         builds from repo root, ships engine+shared+usecases
+    spec.yaml          SPCS service spec (image, env, endpoint)
 
 shared/     COMMON conventions. inherited by every pack unless overridden.
   prompts/rubric.md      base /18 rubric        (pack overrides if domain needs it)
@@ -116,6 +124,23 @@ usecases/my_new_agent/
    Cortex Analyst / Genie alone is often simpler and sufficient — don't
    over-engineer.
 
+8. **Two hosting shells exist and are architecturally parallel** — pick
+   whichever platform you're deploying to; `engine/`, `shared/`, `usecases/`
+   are identical either way:
+
+   | | Databricks | Snowflake |
+   |---|---|---|
+   | shell | `platform_databricks/agent.py` (MLflow `ResponsesAgent`) | `platform_snowflake/agent.py` (FastAPI) |
+   | packaging | Models-from-Code | Docker image |
+   | registry | Unity Catalog | Snowflake image repository |
+   | compute | Model Serving endpoint | SPCS compute pool |
+   | chat UI | Databricks App | Streamlit-in-Snowflake, or a custom MCP server so Cortex Agents can call it as a tool |
+
+   Both were verified working end-to-end on the MOCK provider (FastAPI shell:
+   `GET /healthz` → 200, `POST /invoke` → 18/18 real DQ answer). Adding a
+   third platform = one more `platform_<name>/` folder; never touch the other
+   two or `engine/graph.py`.
+
 ## Running it
 
 ```bash
@@ -148,6 +173,33 @@ MLflow Models-from-Code (`code_paths=["engine","shared","usecases"]`) → Unity
 Catalog registration → `agents.deploy()` → Databricks App. That file is the
 ONLY thing you rewrite if you ever leave Databricks.
 
+## Deploying on Snowflake (SPCS)
+
+Recipe is the docstring at the top of `engine/platform_snowflake/agent.py`:
+
+```bash
+docker build -t <repo_url>/dq_agent:latest -f engine/platform_snowflake/Dockerfile .
+docker push <repo_url>/dq_agent:latest
+snow spcs compute-pool create dq_pool --family CPU_X64_XS --min-nodes 1 --max-nodes 1 --auto-resume
+snow spcs service create dq_agent --compute-pool dq_pool --spec-path engine/platform_snowflake/spec.yaml
+# then: SHOW ENDPOINTS IN SERVICE dq_agent;  -> the live URL
+```
+
+`spec.yaml` has a placeholder `<repo_url>` — fill it in from
+`SHOW IMAGE REPOSITORIES` after creating the repo; that's the one manual step
+per Snowflake account. Snowflake injects Cortex credentials into the container
+automatically (via `/snowflake/session/token`) — nothing to manage for
+`LLM_PROVIDER=cortex`/`SQL_TOOL=cortex` calls made from inside the service.
+
+Local test before deploying (no Docker/Snowflake needed):
+```python
+from fastapi.testclient import TestClient
+from engine.platform_snowflake.agent import app
+client = TestClient(app)
+client.get("/healthz")                                   # {"status": "ok", ...}
+client.post("/invoke", json={"question": "..."})          # {"answer": ..., "score": ...}
+```
+
 ## Ownership tiers (what moves on migration)
 
 ```
@@ -156,6 +208,18 @@ ONLY thing you rewrite if you ever leave Databricks.
 ░ Cortex / Genie / Databricks     rented infra      → swapped for the new vendor's
 ⚪ semantic model + raw data       native            → rebuilt per platform (accepted)
 ```
+
+## Repo sync status (check before assuming the remote matches local)
+
+The GitHub remote (`github.com/NagarajDE/portable-agent`) has, at last check,
+lagged behind the local/canonical build by several rounds of changes —
+confirm before relying on it. Known-missing-as-of-last-check items included:
+`CLAUDE.md` itself, `.gitignore`, the real `dq_qals` rubric + its
+`dq_dimensions.md`/`severity_and_triage.md` skills, the entire
+`kpi_analytics/` and `anomaly_rca/` packs, and all of `platform_snowflake/`.
+If you're picking this repo up fresh, run the local test commands above to
+confirm which pieces are actually present before assuming this file is
+in sync with `git status`.
 
 ## Conventions for this codebase specifically
 
