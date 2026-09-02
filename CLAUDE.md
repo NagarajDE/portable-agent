@@ -51,7 +51,7 @@ usecases/<name>/     ONE folder = ONE agent. this is what you add per use case.
   skills/*.md          ONLY domain-specific how-to (not reporting/safety — inherited)
   exemplars/*.yaml      verified Q→SQL pairs (your portable few-shot / seed)
   evals/golden_set.yaml your portable eval questions
-  fixtures.py           MOCK-only demo data; ignored once SQL_TOOL/LLM_PROVIDER are real
+  fixtures.py           MOCK-only demo data; ignored once SQL_TOOL/WORKER_PROVIDER are real
 ```
 
 ### Composition rules (implemented in `engine/graph.py`)
@@ -154,10 +154,32 @@ python run_evals.py <use_case>             # golden-set pass/fail
 
 Flip to a real platform, no code change:
 ```bash
-LLM_PROVIDER=cortex      SQL_TOOL=cortex   python run_local.py <use_case>
-LLM_PROVIDER=databricks  SQL_TOOL=genie    python run_local.py <use_case>
-LLM_PROVIDER=anthropic   SQL_TOOL=mock     python run_local.py <use_case>
+WORKER_PROVIDER=cortex      SQL_TOOL=cortex   python run_local.py <use_case>
+WORKER_PROVIDER=databricks  SQL_TOOL=genie    python run_local.py <use_case>
+WORKER_PROVIDER=anthropic   SQL_TOOL=mock     python run_local.py <use_case>
 ```
+
+Worker and evaluator are selected **independently**, each by a provider + model, so
+you can run a different model under the same provider or two different providers.
+`auto` (or unset) = the sensible default:
+
+|        | provider            | model        | `auto`/unset resolves to |
+|--------|---------------------|--------------|--------------------------|
+| worker | `WORKER_PROVIDER`      | `WORKER_MODEL`  | `mock` / provider's default model |
+| judge  | `EVAL_PROVIDER` | `EVAL_MODEL` | same provider as worker / provider's default model |
+
+```bash
+# same provider, different models for worker vs. judge
+WORKER_PROVIDER=cortex  WORKER_MODEL=llama3.1-70b  EVAL_MODEL=claude-3-5-sonnet  python run_local.py <use_case>
+# different providers entirely
+WORKER_PROVIDER=cortex  EVAL_PROVIDER=anthropic  EVAL_MODEL=claude-sonnet-4-5  python run_local.py <use_case>
+```
+Precedence per role: `WORKER_MODEL`/`EVAL_MODEL` > `<PROVIDER>_MODEL` > built-in default.
+The judge runs only on the short rubric pass (`evaluate` in `engine/graph.py` uses
+`get_eval_client`); a different judge model breaks the self-grading blind spot (a
+model shouldn't score its own output). By design the evaluator scores and drives
+answer-refinement only — it never rewrites the question or the SQL (accuracy stays
+grounded in the native tool).
 
 ## Real adapters are stubbed, not implemented
 
@@ -189,7 +211,7 @@ snow spcs service create dq_agent --compute-pool dq_pool --spec-path engine/plat
 `SHOW IMAGE REPOSITORIES` after creating the repo; that's the one manual step
 per Snowflake account. Snowflake injects Cortex credentials into the container
 automatically (via `/snowflake/session/token`) — nothing to manage for
-`LLM_PROVIDER=cortex`/`SQL_TOOL=cortex` calls made from inside the service.
+`WORKER_PROVIDER=cortex`/`SQL_TOOL=cortex` calls made from inside the service.
 
 Local test before deploying (no Docker/Snowflake needed):
 ```python

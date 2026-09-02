@@ -89,10 +89,31 @@ python run_evals.py parity_hana_snowflake
 ## Flip to a real platform (one env var each — no code change)
 
 ```
-All Snowflake     LLM_PROVIDER=cortex      SQL_TOOL=cortex   python run_local.py
-All Databricks    LLM_PROVIDER=databricks  SQL_TOOL=genie    python run_local.py
-Claude direct     LLM_PROVIDER=anthropic   SQL_TOOL=mock     python run_local.py
+All Snowflake     WORKER_PROVIDER=cortex      SQL_TOOL=cortex   python run_local.py
+All Databricks    WORKER_PROVIDER=databricks  SQL_TOOL=genie    python run_local.py
+Claude direct     WORKER_PROVIDER=anthropic   SQL_TOOL=mock     python run_local.py
 ```
+
+## Pick the worker and evaluator models (independent; `auto` = default)
+
+Worker and evaluator are each chosen by a provider + model. `auto` (or unset) means
+"use the sensible default" — the evaluator defaults to the worker, so omit its knobs
+to keep them identical. Judging with a *different* model breaks the self-grading blind
+spot (a model shouldn't score its own output).
+
+```
+worker provider   WORKER_PROVIDER   (auto -> mock)
+worker model      WORKER_MODEL      (auto -> that provider's default)
+judge  provider   EVAL_PROVIDER     (auto -> same as WORKER_PROVIDER)
+judge  model      EVAL_MODEL        (auto -> that provider's default)
+
+# same provider, different models for worker vs. judge
+WORKER_PROVIDER=cortex  WORKER_MODEL=llama3.1-70b  EVAL_MODEL=claude-3-5-sonnet  python run_local.py
+# different providers entirely
+WORKER_PROVIDER=cortex  EVAL_PROVIDER=anthropic  EVAL_MODEL=claude-sonnet-4-5    python run_local.py
+```
+
+Precedence per role: `WORKER_MODEL`/`EVAL_MODEL` > `<PROVIDER>_MODEL` > built-in default.
 
 ## Add a new agent = add a folder
 

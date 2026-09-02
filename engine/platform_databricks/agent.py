@@ -22,7 +22,7 @@ Deploy (in a Databricks notebook):
 """
 import os
 os.environ.setdefault("USE_CASE", "dq_qals")
-os.environ.setdefault("LLM_PROVIDER", "databricks")     # Foundation Model API
+os.environ.setdefault("WORKER_PROVIDER", "databricks")     # Foundation Model API
 os.environ.setdefault("SQL_TOOL", "genie")              # Genie as text-to-SQL
 
 from mlflow.pyfunc import ResponsesAgent

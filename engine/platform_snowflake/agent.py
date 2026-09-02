@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from engine.graph import build_graph, initial_state
 
 USE_CASE = os.environ.get("USE_CASE", "dq_qals")
-os.environ.setdefault("LLM_PROVIDER", "cortex")   # Cortex COMPLETE
+os.environ.setdefault("WORKER_PROVIDER", "cortex")   # Cortex COMPLETE
 os.environ.setdefault("SQL_TOOL", "cortex")       # Cortex Analyst
 
 app = FastAPI(title="Portable Agent (Snowflake/SPCS)")

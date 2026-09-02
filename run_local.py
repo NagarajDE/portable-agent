@@ -6,7 +6,7 @@ Run any use case locally on the MOCK provider -- no credentials.
     USE_CASE=dq_qals python run_local.py
 
 Flip to a real platform by exporting env first, e.g.:
-    LLM_PROVIDER=databricks SQL_TOOL=genie python run_local.py
+    WORKER_PROVIDER=databricks SQL_TOOL=genie python run_local.py
 """
 import sys, os
 from engine.graph import build_graph, initial_state, load_config

@@ -15,7 +15,7 @@ from typing import TypedDict
 import yaml
 from langgraph.graph import StateGraph, END
 
-from engine.llm_client import get_llm_client, LLMClient
+from engine.llm_client import get_llm_client, get_eval_client, model_summary, LLMClient
 from engine.sql_tool import get_sql_tool, SQLTool
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -84,13 +84,15 @@ class State(TypedDict):
 
 
 def build_graph(use_case: str, llm: LLMClient | None = None,
-                sql: SQLTool | None = None, verbose: bool = True):
+                sql: SQLTool | None = None, eval_llm: LLMClient | None = None,
+                verbose: bool = True):
     cfg = load_config(use_case)
     threshold = cfg.get("threshold", 18)
     max_iters = cfg.get("max_iters", 4)
     os.environ.setdefault("SQL_TOOL", cfg.get("default_sql_tool", "mock"))
 
-    llm = llm or get_llm_client(use_case)
+    llm = llm or get_llm_client(use_case)             # worker: generate + refine
+    eval_llm = eval_llm or get_eval_client(use_case)  # judge: evaluate (independent)
     sql = sql or get_sql_tool(use_case)
     skills = load_skills(use_case)
     exemplars = load_exemplars(use_case)
@@ -98,6 +100,8 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     def log(m):
         if verbose:
             print(m)
+
+    log(f"  [models]   {model_summary()}")
 
     def generate(s: State) -> State:
         data = sql.ask(s["task"])
@@ -108,7 +112,7 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         return {**s, "data": data, "answer": answer, "iterations": 0}
 
     def evaluate(s: State) -> State:
-        verdict = llm.complete(fill(_prompt(use_case, "rubric.md"),
+        verdict = eval_llm.complete(fill(_prompt(use_case, "rubric.md"),
                                     task=s["task"], answer=s["answer"]))
         score = int(re.search(r"SCORE:\s*(\d+)", verdict).group(1))
         log(f"  [evaluate] score {score}/{threshold}  ({verdict.strip()})")

@@ -8,7 +8,7 @@ spec:
       env:
         - name: USE_CASE
           value: "dq_qals"
-        - name: LLM_PROVIDER
+        - name: WORKER_PROVIDER
           value: "cortex"
         - name: SQL_TOOL
           value: "cortex"

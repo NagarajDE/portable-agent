@@ -6,7 +6,7 @@ signal -- it lives in git, not in Cortex, so it survives any migration.
     python run_evals.py parity_hana_snowflake
 
 Note: on the MOCK provider the answer is the same regardless of question, so this
-demonstrates the HARNESS. Real signal comes when LLM_PROVIDER is a real model.
+demonstrates the HARNESS. Real signal comes when WORKER_PROVIDER is a real model.
 """
 import sys, yaml
 from engine.graph import build_graph, initial_state, USECASES

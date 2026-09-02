@@ -1,9 +1,19 @@
 """
 ENGINE / provider-agnostic inference.  GENERIC -- no domain knowledge lives here.
 
-The loop imports get_llm_client() and calls .complete().  It never imports
-anthropic / snowflake / databricks.  Switch provider with one env var:
-    LLM_PROVIDER=mock|anthropic|cortex|databricks
+The loop imports get_llm_client() (worker) and get_eval_client() (judge) and
+calls .complete().  It never imports anthropic / snowflake / databricks.
+
+Worker and evaluator are selected INDEPENDENTLY, each by a provider + model.
+'auto' (or unset) means "use the sensible default":
+    worker :  WORKER_PROVIDER=mock|anthropic|cortex|databricks   WORKER_MODEL=<name|auto>
+    judge  :  EVAL_PROVIDER=<provider|auto>                  EVAL_MODEL=<name|auto>
+    auto ->  worker provider = mock; evaluator provider = same as worker;
+             either model = that provider's own default.
+So you can run a different model under the SAME provider, or different providers
+entirely, for worker vs. judge. Judging with a different model breaks the
+self-grading blind spot (a model shouldn't score its own output).
+Model precedence per role:  WORKER_MODEL / EVAL_MODEL  >  <PROVIDER>_MODEL  >  built-in default.
 
 Note: the MOCK's *mechanic* (climbing score, revision stamping) is generic and
 lives here; the actual answer TEXT it fakes comes from the active use-case's
@@ -66,10 +76,10 @@ def _next_rev(text: str) -> int:        # reads "NEXT_REVISION=N" from the instr
 # mock path never needs them installed. Fill the TODO, set the env var, done.
 # --------------------------------------------------------------------------
 class AnthropicClient:
-    def __init__(self):
+    def __init__(self, model: str | None = None):
         import anthropic
         self._c = anthropic.Anthropic()                 # reads ANTHROPIC_API_KEY
-        self._model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+        self._model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 
     def complete(self, prompt: str, **kw) -> str:
         r = self._c.messages.create(
@@ -80,10 +90,10 @@ class AnthropicClient:
 
 class CortexClient:
     """Snowflake Cortex COMPLETE via Snowpark session."""
-    def __init__(self):
+    def __init__(self, model: str | None = None):
         from snowflake.snowpark import Session
         self._s = Session.builder.configs(sf_cfg()).create()
-        self._model = os.getenv("CORTEX_MODEL", "claude-3-5-sonnet")
+        self._model = model or os.getenv("CORTEX_MODEL", "claude-3-5-sonnet")
 
     def complete(self, prompt: str, **kw) -> str:
         row = self._s.sql("SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS R",
@@ -93,11 +103,11 @@ class CortexClient:
 
 class DatabricksClient:
     """Databricks Foundation Model API (OpenAI-compatible serving endpoint)."""
-    def __init__(self):
+    def __init__(self, model: str | None = None):
         from openai import OpenAI
         self._c = OpenAI(api_key=os.environ["DATABRICKS_TOKEN"],
                          base_url=f"{os.environ['DATABRICKS_HOST']}/serving-endpoints")
-        self._model = os.getenv("DATABRICKS_MODEL", "databricks-claude-sonnet-4")
+        self._model = model or os.getenv("DATABRICKS_MODEL", "databricks-claude-sonnet-4")
 
     def complete(self, prompt: str, **kw) -> str:
         r = self._c.chat.completions.create(
@@ -111,11 +121,54 @@ def sf_cfg() -> dict:
             for k in ("account", "user", "password", "warehouse", "role")}
 
 
-# The only place a provider name is mentioned.
-def get_llm_client(use_case: str | None = None) -> LLMClient:
-    provider = os.getenv("LLM_PROVIDER", "mock").lower()
+# The only place provider names are mentioned.
+_PROVIDERS = {"anthropic": AnthropicClient,
+              "cortex": CortexClient,
+              "databricks": DatabricksClient}
+
+
+def _build(provider: str, use_case: str | None, model: str | None) -> LLMClient:
+    provider = provider.lower()
     if provider == "mock":
         return MockClient(use_case)
-    return {"anthropic": AnthropicClient,
-            "cortex": CortexClient,
-            "databricks": DatabricksClient}[provider]()
+    return _PROVIDERS[provider](model)
+
+
+def _resolve(val: str | None, default):
+    """Unset or 'auto' -> use the default. For a model, default=None means
+    'let the provider's client pick its own default model'."""
+    if val is None or val.strip().lower() in ("", "auto"):
+        return default
+    return val
+
+
+def get_llm_client(use_case: str | None = None) -> LLMClient:
+    """The WORKER: generates and refines. Selected by provider + model:
+        WORKER_PROVIDER   worker provider   (auto -> mock)
+        WORKER_MODEL      worker model      (auto -> that provider's default)
+    """
+    provider = _resolve(os.getenv("WORKER_PROVIDER"), "mock")
+    return _build(provider, use_case, _resolve(os.getenv("WORKER_MODEL"), None))
+
+
+def get_eval_client(use_case: str | None = None) -> LLMClient:
+    """The EVALUATOR: scores against the rubric, chosen INDEPENDENTLY of the worker
+    so a model never grades its own output. SYMMETRIC to the worker knobs; both
+    default to the worker, so leaving them 'auto' keeps evaluator == worker:
+        EVAL_PROVIDER   evaluator provider   (auto -> same as WORKER_PROVIDER)
+        EVAL_MODEL      evaluator model      (auto -> that provider's default)
+    Lets you judge with a different model on the SAME provider, or a different
+    provider entirely.
+    """
+    worker_provider = _resolve(os.getenv("WORKER_PROVIDER"), "mock")
+    provider = _resolve(os.getenv("EVAL_PROVIDER"), worker_provider)
+    return _build(provider, use_case, _resolve(os.getenv("EVAL_MODEL"), None))
+
+
+def model_summary() -> str:
+    """One-line resolved worker/evaluator selection, for the build log."""
+    wp = _resolve(os.getenv("WORKER_PROVIDER"), "mock")
+    ep = _resolve(os.getenv("EVAL_PROVIDER"), wp)
+    wm = _resolve(os.getenv("WORKER_MODEL"), "auto")
+    em = _resolve(os.getenv("EVAL_MODEL"), "auto")
+    return f"worker={wp}:{wm}  evaluator={ep}:{em}"
