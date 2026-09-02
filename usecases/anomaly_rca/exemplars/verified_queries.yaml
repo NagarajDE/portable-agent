@@ -1,0 +1,4 @@
+- question: "Orders per day by channel (last 2 weeks)"
+  sql: "SELECT order_date, channel, COUNT(*) AS orders FROM orders WHERE order_date >= CURRENT_DATE - 14 GROUP BY 1,2 ORDER BY 1,2"
+- question: "Day-over-day order delta by channel"
+  sql: "SELECT order_date, channel, orders - LAG(orders) OVER (PARTITION BY channel ORDER BY order_date) AS dod FROM daily_orders_by_channel"

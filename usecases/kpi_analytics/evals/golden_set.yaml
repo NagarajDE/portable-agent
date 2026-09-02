@@ -1,0 +1,4 @@
+- question: "What was net revenue last month vs the prior month?"
+  expect_contains: ["net revenue", "8.3%"]
+- question: "How did revenue change month over month?"
+  expect_contains: ["up", "MoM"]

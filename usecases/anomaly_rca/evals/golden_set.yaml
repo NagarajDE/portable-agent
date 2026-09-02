@@ -1,0 +1,4 @@
+- question: "Why did orders drop 30% yesterday?"
+  expect_contains: ["mobile", "78%"]
+- question: "Which channel caused the order drop, and is it a data issue?"
+  expect_contains: ["channel", "artifact"]

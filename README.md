@@ -45,6 +45,26 @@ Example in this repo:
 - `parity` has its own `rubric.md` → uses it (override). Both inherit `refine.md`.
 - Both get shared `reporting` + `sql_safety` skills, plus their own domain skills.
 
+
+## Analytics use-case packs (real rubrics + skills)
+
+Three distinct analytical modes, each with a domain rubric and practitioner skills:
+
+```
+  Pack             mode            rubric axes (each /6)
+  ─────────────────────────────────────────────────────────────────────────
+  dq_qals          is it right?    rule correctness · evidence & quantification · actionability
+  kpi_analytics    what does it    metric-definition correctness · time grain & framing · clarity
+                   say?
+  anomaly_rca      why did it      hypothesis quality · evidence & isolation · actionable conclusion
+                   change?
+```
+
+Skills carry real how-to (SQL-level): DQ = six dimensions + severity/triage +
+duplicate detection; KPI = additivity/fan-out + time intelligence + slicing;
+RCA = quantify→localize→decompose + mix-shift + rule-out-artifacts-first. Each
+pack inherits the shared reporting + SQL-safety skills on top.
+
 ## What's common vs. rebuilt per agent
 
 ```

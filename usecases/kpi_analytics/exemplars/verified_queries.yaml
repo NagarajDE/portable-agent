@@ -1,0 +1,4 @@
+- question: "Net revenue by month (excluding voids and test orders)"
+  sql: "SELECT DATE_TRUNC('month', order_ts) AS m, SUM(net_amount) AS net_rev FROM orders WHERE status NOT IN ('void','test') GROUP BY 1 ORDER BY 1"
+- question: "Month-over-month net revenue change"
+  sql: "SELECT m, net_rev, net_rev / LAG(net_rev) OVER (ORDER BY m) - 1 AS mom_pct FROM monthly_net_rev"

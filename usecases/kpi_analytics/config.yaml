@@ -1,0 +1,3 @@
+inherits: [shared]
+name: "KPI / metric analytics"
+sample_task: "What was net revenue last month and how does it compare to the prior month?"
