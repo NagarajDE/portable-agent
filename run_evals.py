@@ -10,6 +10,7 @@ demonstrates the HARNESS. Real signal comes when WORKER_PROVIDER is a real model
 """
 import sys, yaml
 from engine.graph import build_graph, initial_state, USECASES
+from engine.tracing import traced_invoke
 
 def run(use_case: str):
     golden = yaml.safe_load((USECASES / use_case / "evals" / "golden_set.yaml").read_text())
@@ -18,7 +19,7 @@ def run(use_case: str):
     print(f"\nEVAL: {use_case}   ({len(golden)} cases)")
     print("=" * 68)
     for case in golden:
-        answer = app.invoke(initial_state(case["question"]))["best_answer"]
+        answer = traced_invoke(app, initial_state(case["question"]), use_case)["best_answer"]
         missing = [s for s in case["expect_contains"] if s.lower() not in answer.lower()]
         ok = not missing
         passed += ok

@@ -5,6 +5,8 @@ per-agent **use-case packs**. A new agent = a persona + its own tuning; everythi
 mechanical and conventional is inherited. Switch model/database with one env var.
 Host on Databricks with one shell file.
 
+> New to the terminology? Plain-language definitions are in [`GLOSSARY.md`](GLOSSARY.md).
+
 ## Layout
 
 ```

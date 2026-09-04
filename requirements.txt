@@ -1,12 +1,18 @@
 # --- engine core (needed to run locally) ---
 langgraph
 pyyaml
+pydantic                     # typed, validated judge verdict (comes with langgraph too)
 
 # --- real providers: install only the ones you use ---
 anthropic                    # WORKER_PROVIDER=anthropic
 snowflake-snowpark-python    # WORKER_PROVIDER=cortex  / SQL_TOOL=cortex
 openai                       # WORKER_PROVIDER=databricks (OpenAI-compatible endpoint)
 databricks-sdk               # SQL_TOOL=genie
+
+# --- OPTIONAL observability: install ONLY if you set TRACER=otel ---
+# Default TRACER=stdout needs none of these (zero-dep JSON events). Lazy-imported.
+# opentelemetry-sdk
+# opentelemetry-exporter-otlp-proto-http
 
 # --- only needed to DEPLOY on Snowflake (SPCS) ---
 fastapi

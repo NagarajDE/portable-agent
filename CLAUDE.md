@@ -6,6 +6,7 @@ reasoning behind them, so you don't re-litigate them per session.
 > For the full narrative — the goal, why the project exists, the concepts we
 > clarified, and the decision log with reasoning — see **`PROJECT_CONTEXT.md`**.
 > This file is the operational spec; that one is the story and the "why".
+> New to the terms (interface, LLMClient, engine, pack, verdict…)? See **`GLOSSARY.md`**.
 
 ## What this is
 
@@ -31,6 +32,7 @@ engine/     GENERIC. shared code. touch rarely.
   graph.py             the loop: generate→evaluate→refine, composes shared+pack
   llm_client.py         LLMClient interface + mock|anthropic|cortex|databricks
   sql_tool.py           SQLTool  interface + mock|cortex-analyst|genie
+  tracing.py            Tracer   interface + stdout|mlflow|eventtable|none
   platform_databricks/agent.py   the ONLY Databricks-specific file (~25 lines)
   platform_snowflake/             the ONLY Snowflake-specific files (SPCS)
     agent.py           FastAPI shell: POST /invoke, GET /healthz
@@ -181,6 +183,40 @@ model shouldn't score its own output). By design the evaluator scores and drives
 answer-refinement only — it never rewrites the question or the SQL (accuracy stays
 grounded in the native tool).
 
+## Observability (a self-contained, optional module)
+
+The platforms capture INFRA calls (endpoint I/O, tokens, the SQL a tool ran) but NOT
+this loop's decision trail (iterations, per-step score, the judge's reason). We OWN that
+emission — and ALL of it lives in ONE file, `engine/tracing.py`. The loop (`graph.py`)
+stays pure: it imports `instrument` and wraps each node at registration
+(`add_node("generate", instrument("generate", generate, use_case))`), and call sites use
+`traced_invoke(graph, state, use_case)` instead of `graph.invoke(...)`. To change or
+extend observability, edit only `tracing.py`.
+
+```bash
+TRACER=stdout      # DEFAULT, zero-dep: one JSON event per step to stdout
+TRACER=otel        # OpenTelemetry spans (run=trace, node=child span) -> OTLP or console
+TRACER=mlflow      # Databricks: MLflow Tracing spans (stubbed)
+TRACER=eventtable  # Snowflake: SPCS event-table rows (stubbed)
+TRACER=none        # disable
+```
+Mature tools are OPTIONAL adapters, off unless you switch to them AND install their (lazy)
+deps — the default `stdout` path needs nothing extra. `otel` uses `opentelemetry-sdk`
+(+ the OTLP exporter); it exports to `OTEL_EXPORTER_OTLP_ENDPOINT` if set, else prints
+spans to the console. Events: `run_start · generate · evaluate · refine · run_end`, each stamped with a
+per-invocation `run_id` (also returned by the Snowflake shell's `/invoke`) so loop events
+JOIN to the platform's SQL/token rows. `StdoutTracer` is the portable core — both
+platforms collect stdout (SPCS → event table; Databricks serving → serving/inference
+logs). Do NOT rebuild token/cost telemetry here — read it from Cortex usage views /
+Databricks system tables and correlate by `run_id`.
+
+**Guarantees (do not regress these):** (1) **zero accuracy/token/cost impact** — tracing
+never touches prompts/answers/scores/flow and makes no model or SQL calls; (2) **zero
+overhead when `TRACER=none`** — `instrument` returns the bare node function, no wrapper;
+(3) **fail-safe** — the node runs first and any tracer error is swallowed, so a broken
+sink can never break a run. Latency when enabled is a `json.dumps` + a stdout write per
+event (sub-ms vs. LLM calls) — for real network-backed sinks, batch/flush async.
+
 ## Real adapters are stubbed, not implemented
 
 `engine/llm_client.py` (`CortexClient`, `DatabricksClient`) and
@@ -252,6 +288,18 @@ in sync with `git status`.
   `.format()`.
 - Keep `agent.py` (the Databricks shell) free of business logic — it should
   only ever import and expose, never contain a prompt string or a rule.
+- The judge's reply is parsed into a validated `Verdict(score, reason)` via
+  `parse_verdict()` in `engine/graph.py` (plain Pydantic, not a regex scrape) — it
+  accepts the house line form `SCORE: N/<max> - <reason>` or a JSON object, re-asks the
+  judge `eval_retries` times on unparseable output, then falls back to score 0. Rubric
+  prompts keep emitting the one-line `SCORE: N/18 - <reason>` form; don't "simplify" the
+  evaluate node back to a bare regex. We use plain Pydantic here on purpose — do NOT
+  pull in an agent framework (Pydantic AI / instructor) for the generic core.
+- Keep observability OUT of the loop. `graph.py` nodes are pure; all tracing lives in
+  `engine/tracing.py` and is applied via `instrument(...)` (node wrapper) + `traced_invoke`
+  (run wrapper). Don't add `tracer.event(...)`, timing, or vendor observability SDKs
+  (mlflow/snowflake) into `graph.py`. `log()` stays for human console output (verbose);
+  structured queryable events are the Tracer's job. Preserve the three guarantees above.
 - When editing a rubric or skill, prefer specificity to your actual domain
   (real thresholds, real table/column names) over generic placeholders — the
   shipped rubrics here are realistic starting points, not tuned to any one

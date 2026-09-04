@@ -1,4 +1,5 @@
 # Defaults inherited by any pack whose config declares: inherits: [shared]
 threshold: 18
 max_iters: 4
+eval_retries: 1        # extra judge re-asks if its verdict can't be parsed (total tries = 1 + this)
 default_sql_tool: mock

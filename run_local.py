@@ -10,6 +10,7 @@ Flip to a real platform by exporting env first, e.g.:
 """
 import sys, os
 from engine.graph import build_graph, initial_state, load_config
+from engine.tracing import traced_invoke
 
 def main():
     use_case = (sys.argv[1] if len(sys.argv) > 1
@@ -19,7 +20,7 @@ def main():
     print(f"\nUSE CASE: {cfg['name']}  [{use_case}]")
     print(f"TASK    : {task}\n" + "-" * 68)
     app = build_graph(use_case)
-    final = app.invoke(initial_state(task))
+    final = traced_invoke(app, initial_state(task), use_case)
     print("-" * 68)
     print(f"BEST SCORE : {final['best_score']}/{cfg.get('threshold', 18)}")
     print(f"BEST ANSWER: {final['best_answer']}\n")

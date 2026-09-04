@@ -19,10 +19,12 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from engine.graph import build_graph, initial_state
+from engine.tracing import traced_invoke
 
 USE_CASE = os.environ.get("USE_CASE", "dq_qals")
 os.environ.setdefault("WORKER_PROVIDER", "cortex")   # Cortex COMPLETE
 os.environ.setdefault("SQL_TOOL", "cortex")       # Cortex Analyst
+os.environ.setdefault("TRACER", "stdout")         # JSON events -> SPCS stdout -> event table
 
 app = FastAPI(title="Portable Agent (Snowflake/SPCS)")
 _graph = build_graph(USE_CASE, verbose=False)      # built once at startup
@@ -35,14 +37,16 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     score: int
+    run_id: str          # correlate this answer to its event-table / query-history rows
 
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "use_case": USE_CASE}
+    return {"status": "ok", "use_case": USE_CASE, "tracer": os.getenv("TRACER", "stdout")}
 
 
 @app.post("/invoke", response_model=AskResponse)
 def invoke(req: AskRequest) -> AskResponse:
-    final = _graph.invoke(initial_state(req.question))
-    return AskResponse(answer=final["best_answer"], score=final["best_score"])
+    final = traced_invoke(_graph, initial_state(req.question), USE_CASE)
+    return AskResponse(answer=final["best_answer"], score=final["best_score"],
+                       run_id=final["run_id"])

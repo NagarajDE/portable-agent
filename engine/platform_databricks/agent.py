@@ -24,21 +24,24 @@ import os
 os.environ.setdefault("USE_CASE", "dq_qals")
 os.environ.setdefault("WORKER_PROVIDER", "databricks")     # Foundation Model API
 os.environ.setdefault("SQL_TOOL", "genie")              # Genie as text-to-SQL
+os.environ.setdefault("TRACER", "stdout")               # JSON events -> serving logs; set TRACER=mlflow for spans
 
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse
 from mlflow.models import set_model
 
 from engine.graph import build_graph, initial_state
+from engine.tracing import traced_invoke
 
 
 class PortableAgent(ResponsesAgent):
     def __init__(self):
-        self.app = build_graph(os.environ["USE_CASE"])       # portable loop + chosen pack
+        self.use_case = os.environ["USE_CASE"]
+        self.app = build_graph(self.use_case)                # portable loop + chosen pack
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         task = request.input[-1]["content"]                  # last user message
-        final = self.app.invoke(initial_state(task))
+        final = traced_invoke(self.app, initial_state(task), self.use_case)
         return ResponsesAgentResponse(
             output=[{"role": "assistant", "content": final["best_answer"]}])
 

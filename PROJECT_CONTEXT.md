@@ -129,6 +129,19 @@ Real cost of a new agent: one persona paragraph + its own tuning.
     one deployable service; grant the platform's RBAC on that service. We do NOT
     build our own per-user authorization layer for the single-agent case. A
     multi-agent gateway is the only thing that would require app-level authz. (See §12.)
+12. **The judge returns a typed, validated verdict (plain Pydantic), not a regex scrape**
+    → `evaluate` parses the judge reply into a `Verdict(score, reason)` and re-asks the
+    judge on unparseable output (`eval_retries`), falling back to a safe score 0 if
+    exhausted. Uses plain Pydantic (already a dependency) — we did NOT adopt an agent
+    framework (Pydantic AI / instructor) for this; a framework in the generic core
+    would violate "own the interface". (See §12.6.)
+13. **Observability is a swappable sink, and we OWN the reasoning trail** → the platforms
+    capture infra (endpoint I/O, tokens, the SQL a tool ran) but not the loop's decision
+    trail (iterations, per-step score, judge reason). A `Tracer` interface
+    (`engine/tracing.py`, `TRACER=stdout|mlflow|eventtable|none`) emits structured events;
+    `StdoutTracer` (portable default, JSON to stdout) is collected by both platforms, with
+    MLflow/event-table sinks stubbed. Token/cost telemetry is NOT rebuilt — read it from
+    native usage/system tables and correlate by `run_id`. (See §12.7.)
 
 ---
 
@@ -145,6 +158,8 @@ Real cost of a new agent: one persona paragraph + its own tuning.
 | Databricks shell (`platform_databricks/agent.py`) | ✅ MLflow ResponsesAgent recipe (class `PortableAgent`, use-case-neutral) |
 | Snowflake shell (`platform_snowflake/`) | ✅ FastAPI + Dockerfile + spec.yaml, verified (/healthz 200, /invoke 18/18) |
 | Independent worker + evaluator model selection | ✅ `WORKER_PROVIDER`/`WORKER_MODEL` + `EVAL_PROVIDER`/`EVAL_MODEL`, `auto` supported; mock verified |
+| Hardened judge (typed `Verdict` + retry) | ✅ plain-Pydantic parse/validate, `eval_retries` re-ask, safe fallback; all 4 packs green |
+| Observability (`Tracer` + structured events) | ✅ `engine/tracing.py`, `StdoutTracer` JSON events + `run_id`; mlflow/eventtable stubbed; mock verified |
 | `CLAUDE.md` (Claude Code project memory) | ✅ built |
 
 ### The three analytics modes we built
@@ -311,3 +326,87 @@ RBAC applies per-user, vs. the **service's** role which can over-grant.)
 **Takeaway:** for the stated goal (single-domain agents, one per domain), grant
 access the native way — one deployable service per pack — and reserve a gateway +
 custom authz only if/when a true multi-domain supervisor is wanted.
+
+### 12.6 Framework note (LangGraph vs. Pydantic AI) + hardened judge (implemented)
+
+**Are they competitors?** Different layers. LangGraph = orchestration (the graph/loop);
+Pydantic AI = typed agents + validated I/O + a model abstraction (with a smaller
+`pydantic-graph` that *does* overlap LangGraph). For this repo:
+- **Keep LangGraph** for the 3-node loop — no reason to switch.
+- **Don't adopt Pydantic AI as the model/tool interface** — that would put a fast-moving
+  framework inside the generic core, inverting our "own the interface" principle, and it
+  doesn't even cover Cortex-via-Snowpark. If ever used, it belongs *behind* `LLMClient`.
+- Pydantic AI is a **building block, not a portability strategy**; our value (pack
+  composition, git-owned exemplars/evals, the `SQLTool` bridge, hosting shells) is
+  orthogonal to it.
+
+**What we DID take from that idea — the one real fit:** the judge's score used to be a
+brittle regex scrape (`re.search(r"SCORE:\s*(\d+)")`) that would crash on any reply not
+in the exact format. Hardened with **plain Pydantic** (already a dependency via
+langgraph — no framework added):
+- `Verdict(score: int, reason: str)` in `engine/graph.py`, with validation (score ≥ 0
+  and ≤ threshold).
+- `parse_verdict()` accepts either JSON `{"score","reason"}` or the house line form
+  `SCORE: N/<max> - <reason>`; raises on anything unparseable/out-of-range.
+- `evaluate` re-asks the judge on failure (`eval_retries`, default 1 → 2 tries total)
+  with a corrective nudge, then falls back to a safe score 0 (forces a refine) instead
+  of crashing. The `reason` is preserved into `feedback` so `refine` still gets guidance.
+- Verified: retry recovers from transient garbage; exhaustion degrades gracefully; all
+  four packs still 18/18 and evals green.
+
+### 12.7 Observability — own the reasoning trail, rent the collection (implemented)
+
+**Challenge to "the platform captures it for us":** half true. Model serving captures
+*infra* — the endpoint's request/response, per-call tokens/cost, and the SQL a tool ran
+(Cortex `QUERY_HISTORY` / usage views; Databricks inference tables / system tables). It
+captures **nothing** about *this loop's* decisions: how many refine rounds, the score at
+each step, the judge's reason, retries. That trail is the whole value here, and before
+this change it went only to `print()` — and the Snowflake shell ran `verbose=False`, so
+it was silently discarded. Extra wrinkle: if `WORKER_PROVIDER=anthropic` while hosting on
+Snowflake, the LLM call leaves the container entirely, so the host sees no tokens at all.
+
+**Solution — same pattern as everything else (own the interface, rent the backend):**
+
+| Layer | What | Where |
+|---|---|---|
+| Portable core (own) | structured events per step via a `Tracer`; `StdoutTracer` = one JSON line each | `engine/tracing.py` + `engine/graph.py` |
+| Native collection (rent) | Snowflake SPCS stdout → **event table** (`SYSTEM$GET_SERVICE_LOGS`); Databricks serving/**inference tables**, optional **MLflow Tracing** spans | per platform |
+| Cost/token telemetry (native) | Cortex usage views / Databricks system tables — **not rebuilt**, read natively | per platform |
+
+- `TRACER=stdout|otel|mlflow|eventtable|none`. Mature tools are **optional adapters, off
+  by default** — you avoid the heavy tool until you actually want it:
+  - **`stdout`** (default, zero deps): JSON events both platforms collect off stdout. Enough
+    for most needs; no library, no backend.
+  - **`otel`** (implemented): OpenTelemetry — run = one trace, each node = a child span; the
+    root `run` span parents them (verified). Exports OTLP to `OTEL_EXPORTER_OTLP_ENDPOINT`,
+    else a console exporter (no backend needed to see it). Lazy-imports `opentelemetry-sdk`
+    only when selected; deps are commented-optional in `requirements.txt`. Vendor-neutral —
+    the recommended path once a backend exists.
+  - **`mlflow` / `eventtable`** (stubbed): Databricks-native / Snowflake-native sinks.
+  Rule of thumb: don't adopt a heavy tool before you have a collector + a backend + someone
+  who reads dashboards; until then `stdout` → event table / serving logs already answers
+  "what did the loop do?" (matches decision #7).
+- Events: `run_start · generate · evaluate · refine · run_end`, each carrying a
+  per-invocation **`run_id`** plus per-node `ms`, score, best_score, answer preview, and
+  the evaluate `verdict`. The Snowflake shell returns `run_id` from `/invoke`.
+- **Correlation:** `run_id` is the join key between our loop events and the platform's SQL/
+  token rows. (Future: also set it as a Snowflake query tag / Databricks request metadata.)
+
+**Modular by construction (the key design point):** the loop (`graph.py`) contains NO
+tracing logic — nodes are pure functions. All observability lives in `engine/tracing.py`
+and is applied from the OUTSIDE: `instrument(name, fn, use_case)` wraps each node, and
+`traced_invoke(graph, state, use_case)` brackets a run with `run_start`/`run_end`. To
+change or extend observability you edit exactly one file. Same "own it or lose it" rule as
+the rest of the repo: the reasoning trail is high-value + portable → we emit it; routine
+billing telemetry is native → we read it, not rebuild it.
+
+**Three guarantees (verified on mock, must not regress):**
+1. **No accuracy / token / cost impact** — tracing never touches prompts, answers, scores,
+   or control flow, and makes no model/SQL calls. Zero extra tokens.
+2. **Zero overhead when disabled** — with `TRACER=none`, `instrument` returns the *bare*
+   node function (no wrapper, no timing), and `traced_invoke` is a straight passthrough.
+3. **Fail-safe** — the node/graph runs first; any tracer error (incl. a missing SDK like
+   `mlflow`) is swallowed, so a broken sink can never break a run. Verified: `TRACER=mlflow`
+   with mlflow absent still returns 18/18.
+Latency when *enabled* is a `json.dumps` + stdout write per event (sub-ms vs. LLM calls);
+real network-backed sinks should batch/flush async so this stays negligible.
