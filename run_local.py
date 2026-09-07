@@ -9,6 +9,11 @@ Flip to a real platform by exporting env first, e.g.:
     WORKER_PROVIDER=databricks SQL_TOOL=genie python run_local.py
 """
 import sys, os
+try:                                   # optional: load a local .env if python-dotenv is installed
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 from engine.graph import build_graph, initial_state, load_config
 from engine.tracing import traced_invoke
 

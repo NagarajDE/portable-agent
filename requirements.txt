@@ -9,6 +9,9 @@ snowflake-snowpark-python    # WORKER_PROVIDER=cortex  / SQL_TOOL=cortex
 openai                       # WORKER_PROVIDER=databricks (OpenAI-compatible endpoint)
 databricks-sdk               # SQL_TOOL=genie
 
+# --- OPTIONAL local dev: auto-load a .env file so you don't export vars by hand ---
+python-dotenv
+
 # --- OPTIONAL observability: install ONLY if you set TRACER=otel ---
 # Default TRACER=stdout needs none of these (zero-dep JSON events). Lazy-imported.
 # opentelemetry-sdk

@@ -1,0 +1,14 @@
+# Runtime deps for the SPCS container ONLY -- kept minimal and Snowflake-focused.
+# (The repo-root requirements.txt lists every provider incl. Databricks/MLflow; we do
+#  NOT want those in the Snowflake image.)
+langgraph
+pyyaml
+pydantic
+fastapi
+uvicorn[standard]
+snowflake-snowpark-python        # Cortex COMPLETE + running Analyst-generated SQL
+requests                         # Cortex Analyst REST call (also pulled in by the connector)
+
+# Optional observability -- uncomment ONLY if you set TRACER=otel:
+# opentelemetry-sdk
+# opentelemetry-exporter-otlp-proto-http

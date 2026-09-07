@@ -1,21 +1,35 @@
-# SPCS service spec. Snowflake injects SNOWFLAKE_HOST / SNOWFLAKE_ACCOUNT and a
-# short-lived OAuth token at /snowflake/session/token automatically — no secrets
-# to manage for Cortex calls made from inside the container.
+# SPCS service specification.
+#  - `env` is a MAP (KEY: value) in SPCS -- NOT the Kubernetes list form.
+#  - Replace the image path below with YOUR repository's path (see the deploy guide):
+#      docs/deployment/deploy-snowflake.md   ->  from  SHOW IMAGE REPOSITORIES
+#    Path form:  /<database>/<schema>/<image_repo>/<image_name>:<tag>   (all lowercase).
+#
+# Snowflake injects SNOWFLAKE_HOST/ACCOUNT + a short-lived OAuth token at
+# /snowflake/session/token automatically -- so Cortex calls made FROM inside the service
+# need no secrets. (Wiring the Cortex adapters to use that token is a separate step; the
+# shipped adapters are stubbed -- see the guide. That is why this spec runs MOCK first.)
 spec:
   containers:
     - name: dq-agent
-      image: "<repo_url>/dq_agent:latest"   # from: SHOW IMAGE REPOSITORIES
+      image: "/my_db/my_schema/agent_repo/dq_agent:latest"
       env:
-        - name: USE_CASE
-          value: "dq_qals"
-        - name: WORKER_PROVIDER
-          value: "cortex"
-        - name: SQL_TOOL
-          value: "cortex"
+        USE_CASE: "dq_qals"
+        # FIRST deploy on MOCK -> guaranteed to work end-to-end (no creds, no adapters).
+        WORKER_PROVIDER: "mock"
+        SQL_TOOL: "mock"
+        TRACER: "stdout"        # JSON events -> container stdout -> event table
+        # --- switch to real Cortex (adapters are wired; see the guide) ---
+        # WORKER_PROVIDER: "cortex"
+        # SQL_TOOL: "cortex"
+        # CORTEX_SEMANTIC_MODEL: "@my_db.my_schema.my_stage/model.yaml"
+        # SNOWFLAKE_WAREHOUSE: "MY_WH"     # needed to run COMPLETE + the Analyst-generated SQL
+        # SNOWFLAKE_DATABASE: "MY_DB"
+        # SNOWFLAKE_SCHEMA: "MY_SCHEMA"
+        # (SNOWFLAKE_HOST / SNOWFLAKE_ACCOUNT + the OAuth token are injected by SPCS)
       readinessProbe:
         port: 8080
         path: /healthz
   endpoints:
     - name: api
       port: 8080
-      public: true      # false to keep it Snowflake-internal only
+      public: true      # false to keep it reachable only inside Snowflake

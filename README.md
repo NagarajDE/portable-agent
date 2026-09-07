@@ -134,6 +134,8 @@ Docstring atop `engine/platform_databricks/agent.py`: MLflow Models-from-Code
 (`code_paths=["engine","shared","usecases"]`) → Unity Catalog → `agents.deploy()`
 → Databricks App.
 
+> **New to this? Beginner step-by-step guide:** [`docs/deployment/deploy-databricks.md`](docs/deployment/deploy-databricks.md)
+
 
 ## Host on Snowflake (SPCS)
 
@@ -151,6 +153,8 @@ SHOW ENDPOINTS IN SERVICE dq_agent;   -- the URL to call
 Snowflake injects Cortex credentials into the container automatically (no
 secrets to manage). Front it with Streamlit-in-Snowflake for a chat UI, or
 register it as a custom MCP server so Cortex Agents can call it as a tool.
+
+> **New to containers/Snowflake? Beginner step-by-step guide:** [`docs/deployment/deploy-snowflake.md`](docs/deployment/deploy-snowflake.md)
 
 ## Ownership tiers
 

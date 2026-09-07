@@ -9,6 +9,11 @@ Note: on the MOCK provider the answer is the same regardless of question, so thi
 demonstrates the HARNESS. Real signal comes when WORKER_PROVIDER is a real model.
 """
 import sys, yaml
+try:                                   # optional: load a local .env if python-dotenv is installed
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 from engine.graph import build_graph, initial_state, USECASES
 from engine.tracing import traced_invoke
 

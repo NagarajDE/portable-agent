@@ -89,10 +89,9 @@ class AnthropicClient:
 
 
 class CortexClient:
-    """Snowflake Cortex COMPLETE via Snowpark session."""
+    """Snowflake Cortex COMPLETE via a Snowpark session (SPCS OAuth token or local creds)."""
     def __init__(self, model: str | None = None):
-        from snowflake.snowpark import Session
-        self._s = Session.builder.configs(sf_cfg()).create()
+        self._s = snowpark_session()
         self._model = model or os.getenv("CORTEX_MODEL", "claude-3-5-sonnet")
 
     def complete(self, prompt: str, **kw) -> str:
@@ -119,6 +118,58 @@ class DatabricksClient:
 def sf_cfg() -> dict:
     return {k: os.environ[f"SNOWFLAKE_{k.upper()}"]
             for k in ("account", "user", "password", "warehouse", "role")}
+
+
+# --- Snowflake auth shared by CortexClient (COMPLETE) and CortexAnalystTool (Analyst REST).
+#     Inside SPCS: use the OAuth token Snowflake injects at /snowflake/session/token.
+#     Locally:     fall back to SNOWFLAKE_* user/password (session) / SNOWFLAKE_PAT (REST).
+_SPCS_TOKEN = "/snowflake/session/token"
+
+
+def snowpark_session():
+    """A Snowpark Session that works both inside SPCS (injected OAuth token) and locally
+    (SNOWFLAKE_* user/password via sf_cfg)."""
+    from snowflake.snowpark import Session
+    if os.path.exists(_SPCS_TOKEN):
+        with open(_SPCS_TOKEN) as f:
+            token = f.read()
+        cfg = {"host": os.environ["SNOWFLAKE_HOST"],
+               "account": os.environ["SNOWFLAKE_ACCOUNT"],
+               "token": token, "authenticator": "oauth"}
+        for env, key in (("SNOWFLAKE_WAREHOUSE", "warehouse"), ("SNOWFLAKE_DATABASE", "database"),
+                         ("SNOWFLAKE_SCHEMA", "schema"), ("SNOWFLAKE_ROLE", "role")):
+            if os.getenv(env):
+                cfg[key] = os.environ[env]
+        return Session.builder.configs(cfg).create()
+    cfg = sf_cfg()                                    # local: user/password from SNOWFLAKE_*
+    for env, key in (("SNOWFLAKE_DATABASE", "database"), ("SNOWFLAKE_SCHEMA", "schema")):
+        if os.getenv(env):
+            cfg[key] = os.environ[env]
+    return Session.builder.configs(cfg).create()
+
+
+def snowflake_rest_base() -> str:
+    """Base URL for Snowflake REST APIs (e.g. Cortex Analyst)."""
+    host = os.getenv("SNOWFLAKE_HOST")
+    if not host:
+        raise RuntimeError("SNOWFLAKE_HOST is required for Cortex Analyst REST calls.")
+    return f"https://{host}"
+
+
+def snowflake_bearer_headers() -> dict:
+    """Bearer auth headers for Snowflake REST. SPCS OAuth token if present, else a
+    Programmatic Access Token from SNOWFLAKE_PAT (handy for local testing)."""
+    if os.path.exists(_SPCS_TOKEN):
+        with open(_SPCS_TOKEN) as f:
+            token, ttype = f.read(), "OAUTH"
+    elif os.getenv("SNOWFLAKE_PAT"):
+        token, ttype = os.environ["SNOWFLAKE_PAT"], "PROGRAMMATIC_ACCESS_TOKEN"
+    else:
+        raise RuntimeError("No Snowflake token: run inside SPCS, or set SNOWFLAKE_PAT "
+                           "(+ SNOWFLAKE_HOST) for local Cortex Analyst REST calls.")
+    return {"Authorization": f"Bearer {token}",
+            "X-Snowflake-Authorization-Token-Type": ttype,
+            "Content-Type": "application/json", "Accept": "application/json"}
 
 
 # The only place provider names are mentioned.

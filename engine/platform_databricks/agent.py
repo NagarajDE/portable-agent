@@ -13,7 +13,7 @@ Deploy (in a Databricks notebook):
             name="dq_agent",
             python_model="engine/platform_databricks/agent.py",   # Models-from-Code
             code_paths=["engine", "shared", "usecases"],                     # ship both packages
-            pip_requirements=["langgraph", "pyyaml", "openai",
+            pip_requirements=["langgraph", "pyyaml", "pydantic", "openai",
                               "mlflow", "databricks-agents", "databricks-sdk"],
         )
     mlflow.register_model(info.model_uri, "main.dq.dq_agent")      # -> Unity Catalog

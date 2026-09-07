@@ -15,18 +15,40 @@ class SQLTool(Protocol):
     def ask(self, question: str) -> str: ...      # returns rows as text
 
 
-# Snowflake Cortex Analyst -- text-to-SQL over a semantic model.
+def _rows_to_text(rows, max_rows: int = 50) -> str:
+    """Format Snowpark result rows into a compact text block for the LLM to read."""
+    if not rows:
+        return "No rows."
+    dicts = [r.as_dict() for r in rows[:max_rows]]
+    cols = list(dicts[0].keys())
+    lines = [" | ".join(cols)] + [" | ".join(str(d.get(c)) for c in cols) for d in dicts]
+    if len(rows) > max_rows:
+        lines.append(f"... ({len(rows) - max_rows} more rows)")
+    return "\n".join(lines)
+
+
+# Snowflake Cortex Analyst -- text-to-SQL over a semantic model (REST), SQL run via Snowpark.
 class CortexAnalystTool:
     def __init__(self):
-        from snowflake.snowpark import Session
-        from engine.llm_client import sf_cfg
-        self._s = Session.builder.configs(sf_cfg()).create()
-        self._semantic_model = os.environ["CORTEX_SEMANTIC_MODEL"]   # @stage/model.yaml
+        from engine.llm_client import snowpark_session
+        self._s = snowpark_session()                                 # runs the generated SQL
+        self._semantic_model = os.environ["CORTEX_SEMANTIC_MODEL"]   # @db.schema.stage/model.yaml
 
     def ask(self, question: str) -> str:
-        # POST /api/v2/cortex/analyst/message with the semantic model,
-        # run the returned SQL, format rows.
-        raise NotImplementedError("wire Cortex Analyst REST call here")
+        import requests
+        from engine.llm_client import snowflake_rest_base, snowflake_bearer_headers
+        body = {"messages": [{"role": "user",
+                              "content": [{"type": "text", "text": question}]}],
+                "semantic_model_file": self._semantic_model}
+        resp = requests.post(f"{snowflake_rest_base()}/api/v2/cortex/analyst/message",
+                             headers=snowflake_bearer_headers(), json=body, timeout=60)
+        resp.raise_for_status()
+        content = resp.json().get("message", {}).get("content", [])
+        sql = next((c["statement"] for c in content if c.get("type") == "sql"), None)
+        if not sql:                                                  # ambiguous Q -> return the text
+            texts = [c.get("text", "") for c in content if c.get("type") == "text"]
+            return "\n".join(t for t in texts if t) or "Cortex Analyst returned no SQL."
+        return _rows_to_text(self._s.sql(sql).collect())
 
 
 # Databricks Genie -- text-to-SQL over Unity Catalog (managed MCP tool once deployed).

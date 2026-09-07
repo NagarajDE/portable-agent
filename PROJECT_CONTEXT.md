@@ -150,8 +150,8 @@ Real cost of a new agent: one persona paragraph + its own tuning.
 | Component | Status |
 |---|---|
 | Engine loop (LangGraph, generate→evaluate→refine, /18) | ✅ built, runs on mock |
-| LLM adapters: mock ✅ · anthropic/cortex/databricks | ✅ mock; others stubbed (SDK shape + TODO) |
-| SQL-tool adapters: mock ✅ · cortex-analyst/genie | ✅ mock; others stubbed |
+| LLM adapters: mock ✅ · cortex ✅ · anthropic/databricks | ✅ mock; ✅ **Cortex wired** (COMPLETE, SPCS OAuth token + local fallback); anthropic/databricks stubbed |
+| SQL-tool adapters: mock ✅ · cortex-analyst ✅ · genie | ✅ mock; ✅ **Cortex Analyst wired** (REST → runs generated SQL); genie stubbed |
 | Shared tier (rubric, refine, reporting + sql_safety skills) | ✅ built |
 | Use-case packs | ✅ `dq_qals`, `kpi_analytics`, `anomaly_rca`, `parity_hana_snowflake` |
 | Exemplars (verified Q→SQL) + golden eval sets per pack | ✅ built, `run_evals.py` green (2/2 each) |
@@ -188,9 +188,10 @@ Same engine every time; only the `platform_<name>/` shell changes.
 ## 9. What is intentionally NOT solved (scope honesty)
 
 - **Semantic-layer portability** — rebuilt per platform, by design. Not abstracted here.
-- **Real adapters** — Cortex/Databricks/Genie adapters are stubbed with the exact SDK
-  shape + a `TODO`; not wired to live creds.
-- **`spec.yaml` image URL** — placeholder `<repo_url>`; filled per Snowflake account.
+- **Cortex adapters are WIRED** (COMPLETE + Analyst REST, SPCS OAuth token / local fallback)
+  but the live call is **untested from here** (no Snowflake account); needs a real semantic
+  model + Cortex/data grants. **Databricks/Genie adapters remain stubbed.**
+- **`spec.yaml` image path** — per-account placeholder; filled from `SHOW IMAGE REPOSITORIES`.
 - **Databricks catalog/schema names** — filled per workspace.
 
 ---
@@ -200,7 +201,8 @@ Same engine every time; only the `platform_<name>/` shell changes.
 | Next step | Why it matters |
 |---|---|
 | Extract real Cortex verified queries → `exemplars/*.yaml` | Converts today's Snowflake-pooled tuning into portable git assets |
-| Wire ONE real adapter end-to-end (e.g. Databricks Foundation Model) | Watch the loop run on a real model, not the mock |
+| Test the wired Cortex path against a live account (semantic model + grants) | Cortex adapters are coded but unverified end-to-end on real Snowflake |
+| Wire the Databricks/Genie adapters (mirror the Cortex wiring) | The other primary platform still runs on mock only |
 | Add Streamlit-in-Snowflake chat UI | Gives the SPCS path a "looks like Genie" front end |
 | Sync the GitHub remote | Remote lagged the local build (missing CLAUDE.md, 2 packs, platform_snowflake, etc.) |
 | (If portability becomes board-level) neutral semantic layer via dbt/OSI | The only real lever for cross-platform semantic reuse |
@@ -410,3 +412,22 @@ billing telemetry is native → we read it, not rebuild it.
    with mlflow absent still returns 18/18.
 Latency when *enabled* is a `json.dumps` + stdout write per event (sub-ms vs. LLM calls);
 real network-backed sinks should batch/flush async so this stays negligible.
+
+### 12.8 Cortex adapters wired (implemented)
+
+The Snowflake path is no longer mock-only. `CortexClient` (Cortex `COMPLETE`) and
+`CortexAnalystTool` (Cortex Analyst REST → runs the generated SQL, formats rows) are
+implemented behind the existing `LLMClient`/`SQLTool` interfaces — `engine/graph.py` is
+untouched, honoring the "vendor SDK only inside the adapter" rule.
+
+- **Auth is shared + dual-mode** (`engine/llm_client.py`): `snowpark_session()` +
+  `snowflake_bearer_headers()`. Inside SPCS they use the OAuth token Snowflake injects at
+  `/snowflake/session/token` (no secrets); locally they fall back to `SNOWFLAKE_*` creds
+  (Snowpark session) and `SNOWFLAKE_PAT` (Analyst REST bearer).
+- **Config:** `CORTEX_SEMANTIC_MODEL` (Analyst), optional `CORTEX_MODEL`, a warehouse to
+  run SQL, and the `SNOWFLAKE.CORTEX_USER` role + data grants on the service's role.
+- **Robustness:** vendor imports stay lazy (mock path unaffected — verified), ambiguous
+  Analyst replies (no SQL) return the analyst's text instead of crashing, missing-token
+  raises a clear actionable error. **Untested against a live account** (none available here);
+  row-formatter + auth-error paths unit-tested, mock regression green.
+- **Databricks/Genie:** still stubbed — wire the same way (mirror this).

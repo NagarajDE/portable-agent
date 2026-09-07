@@ -217,19 +217,26 @@ overhead when `TRACER=none`** — `instrument` returns the bare node function, n
 sink can never break a run. Latency when enabled is a `json.dumps` + a stdout write per
 event (sub-ms vs. LLM calls) — for real network-backed sinks, batch/flush async.
 
-## Real adapters are stubbed, not implemented
+## Adapter status (which are wired vs. stubbed)
 
-`engine/llm_client.py` (`CortexClient`, `DatabricksClient`) and
-`engine/sql_tool.py` (`CortexAnalystTool`, `GenieTool`) have the exact SDK call
-shape with a `TODO` at the one line needing real creds/endpoint. Wire one at a
-time and test with `SQL_TOOL=mock` first to isolate LLM vs. SQL-tool issues.
+- **Cortex is WIRED** (Snowflake): `CortexClient` (COMPLETE) and `CortexAnalystTool`
+  (Analyst REST → runs the generated SQL) in `engine/llm_client.py` / `engine/sql_tool.py`.
+  Auth is shared via `snowpark_session()` + `snowflake_bearer_headers()`: inside SPCS they
+  use the injected OAuth token at `/snowflake/session/token`; locally they fall back to
+  `SNOWFLAKE_*` creds (session) and `SNOWFLAKE_PAT` (Analyst REST). Needs
+  `CORTEX_SEMANTIC_MODEL` + a warehouse. Verified: imports stay lazy (mock path untouched),
+  row formatter + auth-error paths unit-tested; the live call is untested here (no account).
+- **Databricks/Genie are STILL STUBBED**: `DatabricksClient` / `GenieTool` have the SDK
+  shape + a `TODO`. Wire like Cortex, and test with `SQL_TOOL=mock` first to isolate the
+  LLM path from the SQL path.
 
 ## Deploying on Databricks
 
 Recipe is the docstring at the top of `engine/platform_databricks/agent.py`:
 MLflow Models-from-Code (`code_paths=["engine","shared","usecases"]`) → Unity
 Catalog registration → `agents.deploy()` → Databricks App. That file is the
-ONLY thing you rewrite if you ever leave Databricks.
+ONLY thing you rewrite if you ever leave Databricks. Beginner step-by-step:
+`docs/deployment/deploy-databricks.md` (separate from the code; MOCK-first).
 
 ## Deploying on Snowflake (SPCS)
 
@@ -243,11 +250,17 @@ snow spcs service create dq_agent --compute-pool dq_pool --spec-path engine/plat
 # then: SHOW ENDPOINTS IN SERVICE dq_agent;  -> the live URL
 ```
 
-`spec.yaml` has a placeholder `<repo_url>` — fill it in from
-`SHOW IMAGE REPOSITORIES` after creating the repo; that's the one manual step
-per Snowflake account. Snowflake injects Cortex credentials into the container
-automatically (via `/snowflake/session/token`) — nothing to manage for
-`WORKER_PROVIDER=cortex`/`SQL_TOOL=cortex` calls made from inside the service.
+Beginner step-by-step (separate from the code): `docs/deployment/deploy-snowflake.md`.
+The container was validated for real (image builds, `/healthz` 200, `/invoke` 18/18,
+JSON trace events on stdout). Notes: the image installs
+`engine/platform_snowflake/requirements.txt` (minimal Snowflake set — NOT the repo-root
+requirements), `spec.yaml` uses the SPCS `env:` **map** form (not the k8s list) and ships
+**MOCK-first** so the first deploy works before the Cortex adapters are wired. Fill the
+`image:` path from `SHOW IMAGE REPOSITORIES`. Cortex adapters are **wired**: they use the
+OAuth token Snowflake injects at `/snowflake/session/token` (via `snowpark_session()` /
+`snowflake_bearer_headers()`), so `WORKER_PROVIDER=cortex`/`SQL_TOOL=cortex` works from
+inside the service once you set `CORTEX_SEMANTIC_MODEL` + a warehouse (see the cortex block
+in `spec.yaml`). Spec still ships MOCK-first so the first deploy needs none of that.
 
 Local test before deploying (no Docker/Snowflake needed):
 ```python
