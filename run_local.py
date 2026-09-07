@@ -8,29 +8,36 @@ Run any use case locally on the MOCK provider -- no credentials.
 Flip to a real platform by exporting env first, e.g.:
     WORKER_PROVIDER=databricks SQL_TOOL=genie python run_local.py
 """
-import sys, os
-try:                                   # optional: load a local .env if python-dotenv is installed
+import os
+import sys
+
+try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
+
 from engine.graph import build_graph, initial_state, load_config
+from engine.memory import remember_run
 from engine.tracing import traced_invoke
-from engine.memory import get_memory, remember_run
+
 
 def main():
-    use_case = (sys.argv[1] if len(sys.argv) > 1
-                else os.getenv("USE_CASE", "dq_qals"))
+    use_case = (
+        sys.argv[1] if len(sys.argv) > 1 else os.getenv("USE_CASE", "dq_qals")
+    )
     cfg = load_config(use_case)
     task = cfg["sample_task"]
     print(f"\nUSE CASE: {cfg['name']}  [{use_case}]")
     print(f"TASK    : {task}\n" + "-" * 68)
     app = build_graph(use_case)
     final = traced_invoke(app, initial_state(task), use_case)
-    remember_run(get_memory(), final, use_case)     # episodic capture (no-op unless MEMORY_STORE set)
+    remember_run(final, use_case)
     print("-" * 68)
     print(f"BEST SCORE : {final['best_score']}/{cfg.get('threshold', 18)}")
     print(f"BEST ANSWER: {final['best_answer']}\n")
+
 
 if __name__ == "__main__":
     main()

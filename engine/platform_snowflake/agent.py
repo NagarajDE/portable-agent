@@ -14,26 +14,35 @@ Deploy (from a terminal with Snowflake CLI configured):
         --spec-path engine/platform_snowflake/spec.yaml --min-instances 1 --max-instances 1
     # then: SHOW ENDPOINTS IN SERVICE dq_agent;  -> the URL people/tools hit
 """
+import logging
 import os
+
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator
 
 from engine.graph import build_graph, initial_state
+from engine.memory import NullMemory, get_memory, memory_enabled, remember_run
 from engine.tracing import traced_invoke
-from engine.memory import get_memory, remember_run, memory_enabled, NullMemory
 
 USE_CASE = os.environ.get("USE_CASE", "dq_qals")
-os.environ.setdefault("WORKER_PROVIDER", "cortex")   # Cortex COMPLETE
-os.environ.setdefault("SQL_TOOL", "cortex")       # Cortex Analyst
-os.environ.setdefault("TRACER", "stdout")         # JSON events -> SPCS stdout -> event table
-# MEMORY_STORE defaults to "none" (opt-in). Set MEMORY_STORE=snowflake to persist the
-# episodic + feedback flywheel to tables the service's role owns.
+os.environ.setdefault("WORKER_PROVIDER", "cortex")  # Cortex COMPLETE
+os.environ.setdefault("SQL_TOOL", "cortex")  # Cortex Analyst
+os.environ.setdefault("TRACER", "stdout")  # JSON events -> SPCS stdout -> event table
+# MEMORY_STORE defaults to "none" (opt-in). Set MEMORY_STORE=snowflake to persist
+# the episodic + feedback flywheel to tables the service's role owns.
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Portable Agent (Snowflake/SPCS)")
-_graph = build_graph(USE_CASE, verbose=False)      # built once at startup
-try:                                               # memory is auxiliary: never let a
-    _memory = get_memory()                         # misconfigured store take down serving
+_graph = build_graph(USE_CASE, verbose=False)
+
+try:
+    _memory = get_memory()
 except Exception:
+    logger.exception(
+        "Memory initialization failed; serving without feedback persistence",
+        extra={"event": "memory_init_failed", "use_case": USE_CASE},
+    )
     _memory = NullMemory()
 
 
@@ -52,33 +61,69 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     score: int
-    run_id: str          # correlate this answer to its event-table / query-history / memory rows
+    run_id: str  # Correlate this answer to tracing and memory rows.
 
 
 class FeedbackRequest(BaseModel):
     run_id: str
-    rating: str                    # e.g. "up" / "down", or "1".."5" — your convention
+    rating: str  # e.g. "up" / "down", or "1".."5" — your convention
     note: str | None = None
 
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "use_case": USE_CASE,
-            "tracer": os.getenv("TRACER", "stdout"),
-            "memory": os.getenv("MEMORY_STORE", "none")}
+    return {
+        "status": "ok",
+        "use_case": USE_CASE,
+        "tracer": os.getenv("TRACER", "stdout"),
+        "memory": os.getenv("MEMORY_STORE", "none"),
+    }
 
 
 @app.post("/invoke", response_model=AskResponse)
 def invoke(req: AskRequest) -> AskResponse:
     final = traced_invoke(_graph, initial_state(req.question), USE_CASE)
-    remember_run(_memory, final, USE_CASE)          # episodic capture (best-effort)
-    return AskResponse(answer=final["best_answer"], score=final["best_score"],
-                       run_id=final["run_id"])
+    remember_run(final, USE_CASE)
+    return AskResponse(
+        answer=final["best_answer"],
+        score=final["best_score"],
+        run_id=final["run_id"],
+    )
 
 
 @app.post("/feedback")
 def feedback(req: FeedbackRequest):
-    if not memory_enabled():
-        return {"status": "memory_disabled", "run_id": req.run_id}
-    _memory.record_feedback(req.run_id, req.rating, req.note or "")
+    try:
+        if not memory_enabled():
+            return {"status": "memory_disabled", "run_id": req.run_id}
+
+        effective_backend = _memory.status().get("effective_backend")
+        if (
+            isinstance(_memory, NullMemory)
+            or not effective_backend
+            or effective_backend in ("none", "null", "disabled")
+        ):
+            logger.warning(
+                "Feedback not persisted because memory is unavailable",
+                extra={
+                    "event": "feedback_memory_unavailable",
+                    "use_case": USE_CASE,
+                    "run_id": req.run_id,
+                    "effective_backend": effective_backend,
+                },
+            )
+            return {"status": "memory_unavailable", "run_id": req.run_id}
+
+        _memory.record_feedback(req.run_id, req.rating, req.note or "")
+    except Exception:
+        logger.exception(
+            "Feedback persistence failed",
+            extra={
+                "event": "feedback_persistence_failed",
+                "use_case": USE_CASE,
+                "run_id": req.run_id,
+            },
+        )
+        return {"status": "memory_error", "run_id": req.run_id}
+
     return {"status": "recorded", "run_id": req.run_id}
