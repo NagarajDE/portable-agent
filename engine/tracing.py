@@ -236,15 +236,18 @@ def end_tracer(run_id: str) -> None:
 # graph.py imports only `instrument`; call sites import `traced_invoke`.
 # ==========================================================================
 def _fields(name: str, out: dict) -> dict:
-    """Pull a small, uniform snapshot from a node's OUTPUT state. Knowing the state
-    shape lives HERE, not in the nodes, so the loop stays observability-free."""
+    """Export metrics by default; content requires explicit opt-in via TRACE_INCLUDE_CONTENT=true."""
     f = {"iter": out.get("iterations"),
          "score": out.get("score"),
          "best_score": out.get("best_score")}
-    if name in ("generate", "refine"):
-        f["answer_preview"] = (out.get("answer") or "")[:120]
-    if name == "evaluate":
-        f["verdict"] = out.get("feedback")           # "SCORE: n/thr - reason"
+    include_content = os.getenv(
+        "TRACE_INCLUDE_CONTENT", "false"
+    ).strip().lower() in ("1", "true", "yes")
+    if include_content:
+        if name in ("generate", "refine"):
+            f["answer_preview"] = (out.get("answer") or "")[:120]
+        if name == "evaluate":
+            f["verdict"] = (out.get("feedback") or "")[:500]
     return f
 
 

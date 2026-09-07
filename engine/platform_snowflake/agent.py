@@ -16,7 +16,7 @@ Deploy (from a terminal with Snowflake CLI configured):
 """
 import os
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from engine.graph import build_graph, initial_state
 from engine.tracing import traced_invoke
@@ -31,7 +31,15 @@ _graph = build_graph(USE_CASE, verbose=False)      # built once at startup
 
 
 class AskRequest(BaseModel):
-    question: str
+    question: str = Field(strict=True, min_length=1, max_length=10_000)
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("question must contain non-whitespace characters")
+        return value
 
 
 class AskResponse(BaseModel):

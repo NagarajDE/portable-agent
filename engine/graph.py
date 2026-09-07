@@ -70,10 +70,16 @@ def load_exemplars(use_case: str) -> str:
     return "\n\n".join(f"Q: {p['question']}\nSQL: {p['sql']}" for p in pairs)
 
 
-def fill(template: str, **kw) -> str:
-    for k, v in kw.items():
-        template = template.replace("{" + k + "}", str(v))
-    return template
+def fill(template: str, **kw: object) -> str:
+    return re.sub(
+        r"\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        lambda match: (
+            str(kw[match.group(1)])
+            if match.group(1) in kw
+            else match.group(0)
+        ),
+        template,
+    )
 
 
 class Verdict(BaseModel):
@@ -140,6 +146,14 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     threshold = cfg.get("threshold", 18)
     max_iters = cfg.get("max_iters", 4)
     eval_retries = cfg.get("eval_retries", 1)          # extra judge re-asks on unparseable output
+
+    for name, value, minimum in (
+        ("threshold", threshold, 1),
+        ("max_iters", max_iters, 0),
+        ("eval_retries", eval_retries, 0),
+    ):
+        if type(value) is not int or value < minimum:
+            raise ValueError(f"{name} must be an integer >= {minimum}")
     retry_nudge = (f"\n\nYour previous reply could not be parsed. Reply with EXACTLY "
                    f"one line:  SCORE: N/{threshold} - <short reason>")
     os.environ.setdefault("SQL_TOOL", cfg.get("default_sql_tool", "mock"))

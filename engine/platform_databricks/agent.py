@@ -40,10 +40,33 @@ class PortableAgent(ResponsesAgent):
         self.app = build_graph(self.use_case)                # portable loop + chosen pack
 
     def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
-        task = request.input[-1]["content"]                  # last user message
+        import uuid
+
+        task = ""
+        for item in reversed(request.input):
+            message = item.model_dump() if hasattr(item, "model_dump") else item
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                task = content.strip()
+            elif isinstance(content, list):
+                task = "\n".join(
+                    block["text"]
+                    for block in content
+                    if isinstance(block, dict)
+                    and block.get("type") in ("input_text", "text")
+                    and isinstance(block.get("text"), str)
+                ).strip()
+            break
+
+        if not task:
+            raise ValueError("A non-empty user text message is required")
+
         final = traced_invoke(self.app, initial_state(task), self.use_case)
         return ResponsesAgentResponse(
-            output=[{"role": "assistant", "content": final["best_answer"]}])
+            output=[{"role": "assistant", "content": final["best_answer"]}]
+        )
 
 
 set_model(PortableAgent())

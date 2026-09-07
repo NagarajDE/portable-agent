@@ -78,14 +78,22 @@ def _next_rev(text: str) -> int:        # reads "NEXT_REVISION=N" from the instr
 class AnthropicClient:
     def __init__(self, model: str | None = None):
         import anthropic
-        self._c = anthropic.Anthropic()                 # reads ANTHROPIC_API_KEY
+        self._c = anthropic.Anthropic(
+            timeout=60.0,
+            max_retries=2,
+        )  # reads ANTHROPIC_API_KEY; retries transient SDK errors
         self._model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 
     def complete(self, prompt: str, **kw) -> str:
         r = self._c.messages.create(
             model=self._model, max_tokens=1024,
             messages=[{"role": "user", "content": prompt}])
-        return r.content[0].text
+        text = "\n".join(
+            block.text for block in r.content if block.type == "text"
+        ).strip()
+        if not text:
+            raise RuntimeError("Anthropic returned no text content")
+        return text
 
 
 class CortexClient:
@@ -103,9 +111,31 @@ class CortexClient:
 class DatabricksClient:
     """Databricks Foundation Model API (OpenAI-compatible serving endpoint)."""
     def __init__(self, model: str | None = None):
+        from urllib.parse import urlsplit
         from openai import OpenAI
-        self._c = OpenAI(api_key=os.environ["DATABRICKS_TOKEN"],
-                         base_url=f"{os.environ['DATABRICKS_HOST']}/serving-endpoints")
+
+        token = os.getenv("DATABRICKS_TOKEN", "").strip()
+        host = os.getenv("DATABRICKS_HOST", "").strip()
+        url = urlsplit(host)
+        if not token:
+            raise RuntimeError("DATABRICKS_TOKEN is required")
+        if (
+            url.scheme != "https"
+            or not url.hostname
+            or url.username is not None
+            or url.password is not None
+            or url.path not in ("", "/")
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError("DATABRICKS_HOST must be an HTTPS workspace origin")
+
+        self._c = OpenAI(
+            api_key=token,
+            base_url=f"{host.rstrip('/')}/serving-endpoints",
+            timeout=60.0,
+            max_retries=2,
+        )
         self._model = model or os.getenv("DATABRICKS_MODEL", "databricks-claude-sonnet-4")
 
     def complete(self, prompt: str, **kw) -> str:
