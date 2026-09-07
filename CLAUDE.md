@@ -32,7 +32,8 @@ engine/     GENERIC. shared code. touch rarely.
   graph.py             the loop: generate→evaluate→refine, composes shared+pack
   llm_client.py         LLMClient interface + mock|anthropic|cortex|databricks
   sql_tool.py           SQLTool  interface + mock|cortex-analyst|genie
-  tracing.py            Tracer   interface + stdout|mlflow|eventtable|none
+  tracing.py            Tracer      interface + stdout|otel|mlflow|eventtable|none
+  memory.py             MemoryStore interface + none|mock|sqlite|snowflake (episodic+feedback)
   platform_databricks/agent.py   the ONLY Databricks-specific file (~25 lines)
   platform_snowflake/             the ONLY Snowflake-specific files (SPCS)
     agent.py           FastAPI shell: POST /invoke, GET /healthz
@@ -216,6 +217,31 @@ overhead when `TRACER=none`** — `instrument` returns the bare node function, n
 (3) **fail-safe** — the node runs first and any tracer error is swallowed, so a broken
 sink can never break a run. Latency when enabled is a `json.dumps` + a stdout write per
 event (sub-ms vs. LLM calls) — for real network-backed sinks, batch/flush async.
+
+## Memory (episodic + feedback flywheel — a self-contained, optional module)
+
+All memory code lives in ONE file, `engine/memory.py` (same seam pattern as the others).
+It owns the *learning-flywheel feedstock*: every finished run (episodic) and any thumbs/
+notes (feedback), as **append-only rows you own and can export** — the raw input you later
+curate by hand into `usecases/*/exemplars` + `evals` (git). The loop stays pure; capture is
+applied at the call-site boundary via `remember_run(store, final, use_case)` after
+`traced_invoke`, and the Snowflake shell adds a `POST /feedback` endpoint.
+
+```bash
+MEMORY_STORE=none        # DEFAULT (opt-in). Nothing persisted.
+MEMORY_STORE=mock        # in-memory (tests/inspection)
+MEMORY_STORE=sqlite      # local file (MEMORY_SQLITE_PATH); durable local dev
+MEMORY_STORE=snowflake   # PORTABLE_AGENT_INTERACTIONS/_FEEDBACK tables via Snowpark (prod)
+```
+Guarantees: episodic capture is **fail-safe** (`remember_run` swallows store errors — a bad
+sink never breaks an answer) and makes **no model/SQL-generation calls** (zero token/cost).
+Deliberately **scoped**: we build episodic+feedback only. **Skipped:** semantic/RAG vector
+memory (least portable; wrap Cortex Search / DBX Vector Search instead). **Parked:**
+conversation threads/multi-turn (needs compaction), runtime recall / auto-consolidation
+(would pollute curated exemplars), and a Databricks/Delta adapter. Don't add these to the
+loop; if built, they go behind `MemoryStore` in `engine/memory.py`. Once you persist
+question/answer text you own its PII/retention — rows are append-only + `run_id`-keyed so
+deletion-by-request is a plain `DELETE`.
 
 ## Adapter status (which are wired vs. stubbed)
 

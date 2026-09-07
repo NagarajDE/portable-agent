@@ -142,6 +142,14 @@ Real cost of a new agent: one persona paragraph + its own tuning.
     `StdoutTracer` (portable default, JSON to stdout) is collected by both platforms, with
     MLflow/event-table sinks stubbed. Token/cost telemetry is NOT rebuilt — read it from
     native usage/system tables and correlate by `run_id`. (See §12.7.)
+14. **Memory = the episodic+feedback flywheel, nothing more (for now)** → a swappable
+    `MemoryStore` (`engine/memory.py`, `MEMORY_STORE=none|mock|sqlite|snowflake`) captures
+    every finished run + any feedback as append-only rows you own/export — the feedstock for
+    curating `exemplars`/`evals`. We **skip** semantic/RAG vector memory (least portable;
+    native Cortex Search / DBX Vector Search is superior — wrap it, don't hand-roll) and
+    **park** threads/multi-turn, runtime recall, auto-consolidation, and a Databricks/Delta
+    adapter. Built because it's the highest-value + simplest + most on-thesis memory; the
+    rest isn't worth it yet. Loop stays pure; capture is fail-safe. (See §12.9.)
 
 ---
 
@@ -159,7 +167,8 @@ Real cost of a new agent: one persona paragraph + its own tuning.
 | Snowflake shell (`platform_snowflake/`) | ✅ FastAPI + Dockerfile + spec.yaml, verified (/healthz 200, /invoke 18/18) |
 | Independent worker + evaluator model selection | ✅ `WORKER_PROVIDER`/`WORKER_MODEL` + `EVAL_PROVIDER`/`EVAL_MODEL`, `auto` supported; mock verified |
 | Hardened judge (typed `Verdict` + retry) | ✅ plain-Pydantic parse/validate, `eval_retries` re-ask, safe fallback; all 4 packs green |
-| Observability (`Tracer` + structured events) | ✅ `engine/tracing.py`, `StdoutTracer` JSON events + `run_id`; mlflow/eventtable stubbed; mock verified |
+| Observability (`Tracer` + structured events) | ✅ `engine/tracing.py`, `StdoutTracer` JSON events + `run_id`; otel wired; mlflow/eventtable stubbed; mock verified |
+| Memory (`MemoryStore`: episodic + feedback) | ✅ `engine/memory.py`, none/mock/sqlite verified + `/feedback` endpoint; snowflake adapter coded (untested live); threads/RAG parked |
 | `CLAUDE.md` (Claude Code project memory) | ✅ built |
 
 ### The three analytics modes we built
@@ -431,3 +440,36 @@ untouched, honoring the "vendor SDK only inside the adapter" rule.
   raises a clear actionable error. **Untested against a live account** (none available here);
   row-formatter + auth-error paths unit-tested, mock regression green.
 - **Databricks/Genie:** still stubbed — wire the same way (mirror this).
+
+### 12.9 Memory — the episodic + feedback flywheel (implemented)
+
+**Reframe we landed on:** for this system the valuable, portable, simple memory is NOT
+conversation threads — it's the **episodic + feedback flywheel**, because the crown jewel
+(procedural memory) already lives in git as `exemplars`/`evals`, and episodic+feedback is
+its feedstock. So we built exactly that and nothing more.
+
+**Built** (`engine/memory.py`, one module, same seam as LLMClient/SQLTool/Tracer):
+- `MemoryStore` interface + adapters `NullMemory` (default), `MockMemory`, `SqliteMemory`
+  (local file), `SnowflakeMemory` (append-only `PORTABLE_AGENT_INTERACTIONS`/`_FEEDBACK`
+  tables via the shared Snowpark session). `MEMORY_STORE=none|mock|sqlite|snowflake`.
+- **Episodic**: `remember_run(store, final, use_case)` persists run_id, use_case, question,
+  answer, score, iterations — called at the call-site boundary (shells + `run_local`), so
+  `graph.py` stays pure. **Fail-safe**: a store error is swallowed, never breaks the answer.
+- **Feedback**: `record_feedback(run_id, rating, note)` + a `POST /feedback` endpoint on the
+  Snowflake shell (returns `memory_disabled` when off).
+- Verified on mock + sqlite end-to-end (episodic row + feedback row round-trip); the
+  Snowflake adapter is coded (lazy import; mock path unaffected) but untested live.
+
+**Deliberately skipped / parked (with reasons):**
+- **Skip — semantic/RAG vector memory**: least portable (model-specific embeddings + vendor
+  index) and native (Cortex Search / DBX Vector Search) is superior. Wrap the native service
+  behind `MemoryStore` when needed; don't hand-roll pgvector.
+- **Park — threads/multi-turn**: production-grade needs compaction/summarization and touches
+  every pack's `generate` prompt; packs are single-shot today.
+- **Park — runtime episodic recall + auto-consolidation**: overlaps and risks polluting the
+  curated exemplars. Consolidation stays a human/offline curation step.
+- **Park — Databricks/Delta adapter**: Snowflake is primary and its session is wired.
+
+**Cost we accept by owning memory**: PII/retention/right-to-be-forgotten for stored
+question/answer text is now ours — mitigated by append-only + `run_id`-keyed rows
+(deletion-by-request = a plain `DELETE ... WHERE run_id = ?`).
