@@ -304,3 +304,54 @@ warehouse, and answers from the real rows.
 > Prefer not to use a password locally? You can still validate everything with the built-in
 > mock (`WORKER_PROVIDER=mock SQL_TOOL=mock`) — but that doesn't touch Snowflake. Appendix A
 > is specifically for confirming the **real** Cortex calls before you containerize.
+
+---
+
+## Appendix B — Enable memory (episodic + feedback flywheel)
+
+Optional and **off by default** (`MEMORY_STORE=none`). Turn it on to persist every run and
+any user feedback into two append-only tables **you own** — the raw material you later curate
+into `usecases/*/exemplars` + `evals`. (This is *not* a chat-history/thread feature — that's
+deliberately parked; see `PROJECT_CONTEXT.md` §12.9.)
+
+### B1. Turn it on
+- **In the service:** in `spec.yaml` set `MEMORY_STORE: "snowflake"` (uncomment the line).
+- **Locally:** in `.env` set `MEMORY_STORE=sqlite` (writes a local file — no Snowflake needed),
+  or `MEMORY_STORE=snowflake` with your `SNOWFLAKE_*` creds.
+
+### B2. Grants (one time)
+The service's role needs to create + write the tables in its current database/schema:
+```sql
+GRANT CREATE TABLE ON SCHEMA MY_DB.MY_SCHEMA TO ROLE <service_role>;
+-- after first run the tables exist; INSERT is implicit for the owner role.
+```
+On first use the app auto-creates `PORTABLE_AGENT_INTERACTIONS` and `PORTABLE_AGENT_FEEDBACK`.
+
+### B3. Send feedback
+`POST /feedback` with the `run_id` you got back from `/invoke`:
+```json
+{"run_id": "abc123...", "rating": "down", "note": "missed the root cause"}
+```
+(Returns `{"status": "memory_disabled"}` if `MEMORY_STORE=none`.)
+
+### B4. Use it (the flywheel)
+Find weak runs to curate into verified exemplars:
+```sql
+-- low-scoring or thumbs-down answers, newest first
+SELECT i.run_id, i.question, i.answer, i.score, f.rating, f.note
+FROM PORTABLE_AGENT_INTERACTIONS i
+LEFT JOIN PORTABLE_AGENT_FEEDBACK f USING (run_id)
+WHERE i.score < 16 OR f.rating = 'down'
+ORDER BY i.ts DESC;
+```
+Turn the good Q→answer patterns into entries in `usecases/<pack>/exemplars/` and the failure
+cases into `usecases/<pack>/evals/golden_set.yaml`. That promotion is the portable win — it
+moves tuning from a vendor surface into git.
+
+### B5. Delete on request (PII)
+Rows are `run_id`-keyed and append-only, so honoring a deletion request is one statement:
+```sql
+DELETE FROM PORTABLE_AGENT_INTERACTIONS WHERE run_id = '<id>';
+DELETE FROM PORTABLE_AGENT_FEEDBACK      WHERE run_id = '<id>';
+```
+Remember: once you store question/answer text, retention + PII are **your** responsibility.

@@ -40,6 +40,15 @@ zero-dep default), `OTelTracer` (OpenTelemetry), `MLflowTracer` (Databricks),
 `EventTableTracer` (Snowflake). Chosen with `TRACER=stdout|otel|mlflow|eventtable|none`.
 The mature tools are *optional* — off unless you switch to them. (Code: `engine/tracing.py`.)
 
+**MemoryStore** — the same interface idea again, for *memory*: its promise is
+*"can `log_interaction(...)` and `record_feedback(...)`."* Adapters: `NullMemory` (off,
+default), `MockMemory`, `SqliteMemory` (local file), `SnowflakeMemory` (append-only tables).
+Chosen with `MEMORY_STORE=none|mock|sqlite|snowflake`. (Code: `engine/memory.py`.)
+
+**Flywheel** — the loop that makes the agent better over time *and* keeps the value in git:
+capture every run (episodic) + thumbs (feedback) → a human curates the good/bad ones into
+`exemplars/` + `evals/` → the agent improves. "Flywheel" because each turn feeds the next.
+
 **OpenTelemetry (OTel)** — an open, vendor-neutral industry standard for traces/logs, with
 an "export anywhere" model. Our `OTelTracer` emits it; you point it at any backend. Choosing
 it is not lock-in — that's the whole appeal.

@@ -18,6 +18,7 @@ spec:
         WORKER_PROVIDER: "mock"
         SQL_TOOL: "mock"
         TRACER: "stdout"        # JSON events -> container stdout -> event table
+        # MEMORY_STORE: "snowflake"   # episodic+feedback flywheel -> PORTABLE_AGENT_* tables (see guide Appendix B)
         # --- switch to real Cortex (adapters are wired; see the guide) ---
         # WORKER_PROVIDER: "cortex"
         # SQL_TOOL: "cortex"
