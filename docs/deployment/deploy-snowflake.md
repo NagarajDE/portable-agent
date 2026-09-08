@@ -214,7 +214,10 @@ To make the service answer from real data:
         SNOWFLAKE_SCHEMA: "MY_SCHEMA"
    ```
 3. **Grant the service's role** access to Cortex + the data: `SNOWFLAKE.CORTEX_USER`
-   database role, USAGE on the warehouse, and SELECT on the tables the semantic model uses.
+   database role, USAGE on the warehouse, and **SELECT only** on the tables the semantic
+   model uses. Do **not** grant INSERT/UPDATE/DELETE — Cortex only needs to read, and a
+   read-only role means a mis-generated query physically cannot write. (The app also enforces
+   SELECT-only + a statement timeout as a backstop, but the grant is the real control.)
 4. **Recreate the service** (`DROP SERVICE` then `snow spcs service create ...` again — no
    rebuild needed unless you changed code).
 

@@ -99,10 +99,14 @@ def test_remember_run_captures_with_mock(monkeypatch):
 
 def test_remember_run_swallows_store_errors():
     class Boom:
+        def __init__(self): self.called = False
         def log_interaction(self, *a, **k):
+            self.called = True                          # prove the failure path was reached
             raise RuntimeError("db down")
-    memory._instance = Boom()
+    b = Boom()
+    memory._instance = b
     remember_run({"run_id": "r1"}, "dq_qals")          # must NOT raise
+    assert b.called is True
 
 
 def test_remember_run_swallows_bad_state():

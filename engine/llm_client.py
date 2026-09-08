@@ -75,6 +75,12 @@ def _next_rev(text: str) -> int:        # reads "NEXT_REVISION=N" from the instr
 # REAL ADAPTERS -- same .complete() signature. SDKs imported lazily so the
 # mock path never needs them installed. Fill the TODO, set the env var, done.
 # --------------------------------------------------------------------------
+def _max_tokens() -> int:
+    """Output token cap. Default 4096 -- ample for our short answers/one-line verdicts, so
+    truncation is unlikely; raise LLM_MAX_TOKENS if you generate longer outputs."""
+    return int(os.getenv("LLM_MAX_TOKENS", "4096"))
+
+
 class AnthropicClient:
     def __init__(self, model: str | None = None):
         import anthropic
@@ -83,8 +89,10 @@ class AnthropicClient:
 
     def complete(self, prompt: str, **kw) -> str:
         r = self._c.messages.create(
-            model=self._model, max_tokens=1024,
+            model=self._model, max_tokens=_max_tokens(),
             messages=[{"role": "user", "content": prompt}])
+        if r.stop_reason == "max_tokens":               # truncated: don't treat a cut-off reply as complete
+            raise RuntimeError("Anthropic output truncated (hit max_tokens); raise LLM_MAX_TOKENS")
         text = "\n".join(b.text for b in r.content if b.type == "text").strip()
         if not text:                                    # don't return an empty/None answer
             raise RuntimeError("Anthropic returned no text content")
@@ -100,7 +108,10 @@ class CortexClient:
     def complete(self, prompt: str, **kw) -> str:
         row = self._s.sql("SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS R",
                           params=[self._model, prompt]).collect()[0]
-        return row["R"]
+        text = row["R"]
+        if not text:
+            raise RuntimeError("Cortex COMPLETE returned no text")
+        return text
 
 
 class DatabricksClient:
@@ -122,9 +133,15 @@ class DatabricksClient:
 
     def complete(self, prompt: str, **kw) -> str:
         r = self._c.chat.completions.create(
-            model=self._model,
+            model=self._model, max_tokens=_max_tokens(),
             messages=[{"role": "user", "content": prompt}])
-        return r.choices[0].message.content
+        choice = r.choices[0] if r.choices else None
+        if choice and choice.finish_reason == "length":  # truncated: don't treat as complete
+            raise RuntimeError("Databricks output truncated (finish_reason=length); raise LLM_MAX_TOKENS")
+        text = choice.message.content if choice else None
+        if not text:
+            raise RuntimeError("Databricks endpoint returned no text content")
+        return text
 
 
 def sf_cfg() -> dict:
@@ -199,10 +216,11 @@ def _build(provider: str, use_case: str | None, model: str | None) -> LLMClient:
 
 def _resolve(val: str | None, default):
     """Unset or 'auto' -> use the default. For a model, default=None means
-    'let the provider's client pick its own default model'."""
+    'let the provider's client pick its own default model'. Trims whitespace so a stray
+    ' cortex ' doesn't become an unknown-provider KeyError."""
     if val is None or val.strip().lower() in ("", "auto"):
         return default
-    return val
+    return val.strip()
 
 
 def get_llm_client(use_case: str | None = None) -> LLMClient:

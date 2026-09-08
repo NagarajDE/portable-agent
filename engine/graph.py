@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import math
 import uuid
 from pathlib import Path
 from typing import TypedDict
@@ -30,8 +31,11 @@ SHARED = REPO_ROOT / "shared"
 def load_config(use_case: str) -> dict:
     """Merge inherited bases (e.g. shared) then the pack's own config (pack wins)."""
     pack = yaml.safe_load((USECASES / use_case / "config.yaml").read_text()) or {}
+    inherits = pack.get("inherits", [])
+    if isinstance(inherits, str):                      # `inherits: shared` -> ["shared"], not chars
+        inherits = [inherits]
     merged: dict = {}
-    for base in pack.get("inherits", []):
+    for base in inherits:
         base_cfg = (SHARED if base == "shared" else REPO_ROOT / base) / "config.yaml"
         if base_cfg.exists():
             merged.update(yaml.safe_load(base_cfg.read_text()) or {})
@@ -93,11 +97,24 @@ class Verdict(BaseModel):
         return v
 
 
+def _coerce_score(value) -> int:
+    """A score must be a finite number; round to the nearest int (don't truncate 17.9->17)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"score is not numeric: {value!r}")
+    if not math.isfinite(f):
+        raise ValueError("score must be finite")
+    return round(f)
+
+
 def parse_verdict(raw: str, max_score: int) -> Verdict:
     """Turn a judge reply into a validated Verdict. Accepts either a JSON object
     {"score": N, "reason": "..."} OR the house line form  SCORE: N/<max> - <reason>.
-    Raises ValueError / ValidationError on anything unparseable or out of range so
-    the caller can retry."""
+    Strict: rounds (not truncates) numeric scores, rejects a non-finite score, and rejects a
+    mismatched denominator (so "18/100" is NOT read as 18/max). Injection defense lives in the
+    rubric prompt (the candidate answer is delimited + marked untrusted) plus JSON-first parsing.
+    Raises ValueError / ValidationError on anything unparseable or out of range (caller retries)."""
     text = (raw or "").strip()
     data: dict | None = None
 
@@ -106,17 +123,20 @@ def parse_verdict(raw: str, max_score: int) -> Verdict:
         try:
             obj = json.loads(m.group(0))
             if isinstance(obj, dict) and "score" in obj:
-                data = {"score": int(obj["score"]),
+                data = {"score": _coerce_score(obj["score"]),
                         "reason": str(obj.get("reason", "")).strip()}
         except (ValueError, TypeError):
             data = None
 
-    if data is None:                                   # 2) line form: SCORE: N/max - reason
-        m = re.search(r"SCORE:\s*(\d+)\s*(?:/\s*\d+)?\s*[-–—:]*\s*(.*)",
-                      text, re.IGNORECASE | re.DOTALL)
+    if data is None:                                   # 2) line form: SCORE: N[/denom] - reason
+        m = re.search(r"SCORE:\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*([0-9]+))?\s*[-–—:]*\s*([^\n]*)",
+                      text, re.IGNORECASE)
         if not m:
             raise ValueError(f"no score found in judge reply: {text[:120]!r}")
-        data = {"score": int(m.group(1)), "reason": m.group(2).strip() or text}
+        denom = m.group(2)
+        if denom is not None and int(denom) != max_score:
+            raise ValueError(f"denominator {denom} != max_score {max_score}")
+        data = {"score": _coerce_score(m.group(1)), "reason": m.group(3).strip() or text}
 
     verdict = Verdict(**data)
     if verdict.score > max_score:
@@ -140,20 +160,29 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
                 sql: SQLTool | None = None, eval_llm: LLMClient | None = None,
                 verbose: bool = True):
     cfg = load_config(use_case)
-    threshold = cfg.get("threshold", 18)
+    # max_score = the rubric denominator / validation cap; pass_score = the stop threshold.
+    # `threshold` is kept as the backward-compatible alias for pass_score.
+    max_score = cfg.get("max_score", 18)
+    pass_score = cfg.get("pass_score", cfg.get("threshold", max_score))
     max_iters = cfg.get("max_iters", 4)
     eval_retries = cfg.get("eval_retries", 1)          # extra judge re-asks on unparseable output
-    for _name, _val, _min in (("threshold", threshold, 1), ("max_iters", max_iters, 0),
-                              ("eval_retries", eval_retries, 0)):
+    for _name, _val, _min in (("max_score", max_score, 1), ("pass_score", pass_score, 0),
+                              ("max_iters", max_iters, 0), ("eval_retries", eval_retries, 0)):
         if type(_val) is not int or _val < _min:       # `type is not int` also rejects bools
             raise ValueError(f"{_name} must be an integer >= {_min}")
+    if pass_score > max_score:
+        raise ValueError("pass_score must be <= max_score")
+    if max_iters > 10:                                 # keep graph steps under LangGraph's default recursion limit (25)
+        raise ValueError("max_iters must be <= 10 (raise LangGraph's recursion_limit if you truly need more)")
     retry_nudge = (f"\n\nYour previous reply could not be parsed. Reply with EXACTLY "
-                   f"one line:  SCORE: N/{threshold} - <short reason>")
-    os.environ.setdefault("SQL_TOOL", cfg.get("default_sql_tool", "mock"))
+                   f"one line:  SCORE: N/{max_score} - <short reason>")
 
+    injected_llm = llm                                 # remember whether a worker was injected
     llm = llm or get_llm_client(use_case)             # worker: generate + refine
-    eval_llm = eval_llm or get_eval_client(use_case)  # judge: evaluate (independent)
-    sql = sql or get_sql_tool(use_case)
+    # judge: injected eval wins; else reuse an injected worker (so a real worker isn't paired
+    # with a mock judge); else resolve independently from env.
+    eval_llm = eval_llm or injected_llm or get_eval_client(use_case)
+    sql = sql or get_sql_tool(use_case, cfg.get("default_sql_tool", "mock"))
     skills = load_skills(use_case)
     exemplars = load_exemplars(use_case)
 
@@ -172,12 +201,15 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         return {**s, "data": data, "answer": answer, "iterations": 0}
 
     def evaluate(s: State) -> State:
-        base = fill(_prompt(use_case, "rubric.md"), task=s["task"], answer=s["answer"])
+        # Ground the judge: give it the DATA the answer must be consistent with, so a
+        # fabricated number can't satisfy the rubric (the judge can check against evidence).
+        base = fill(_prompt(use_case, "rubric.md"),
+                    task=s["task"], answer=s["answer"], data=s.get("data", ""))
         verdict: Verdict | None = None
         for attempt in range(eval_retries + 1):
             raw = eval_llm.complete(base if attempt == 0 else base + retry_nudge)
             try:
-                verdict = parse_verdict(raw, threshold)
+                verdict = parse_verdict(raw, max_score)
                 break
             except (ValueError, ValidationError) as e:
                 log(f"  [evaluate] unparseable verdict "
@@ -186,8 +218,8 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
             verdict = Verdict(score=0,
                               reason="judge output unparseable; scored 0 to force a refine")
         score = verdict.score
-        feedback = f"SCORE: {score}/{threshold} - {verdict.reason}"
-        log(f"  [evaluate] score {score}/{threshold}  ({verdict.reason})")
+        feedback = f"SCORE: {score}/{max_score} - {verdict.reason}"
+        log(f"  [evaluate] score {score}/{max_score}  ({verdict.reason})")
         best_a, best_s = (s["answer"], score) if score > s.get("best_score", -1) \
             else (s["best_answer"], s["best_score"])
         return {**s, "score": score, "feedback": feedback,
@@ -202,7 +234,7 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         return {**s, "answer": answer, "iterations": nxt}
 
     def keep_going(s: State) -> str:
-        return "stop" if (s["score"] >= threshold or s["iterations"] >= max_iters) else "refine"
+        return "stop" if (s["score"] >= pass_score or s["iterations"] >= max_iters) else "refine"
 
     # Observability is applied here, from OUTSIDE the nodes: instrument() wraps each node
     # to emit a timed event (or returns it unchanged when TRACER=none -> zero overhead).

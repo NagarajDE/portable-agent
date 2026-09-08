@@ -43,3 +43,73 @@ def test_parse_verdict_rejects_out_of_range():
 def test_parse_verdict_rejects_no_score():
     with pytest.raises((ValueError, ValidationError)):
         parse_verdict("the answer looks fine to me", 18)
+
+
+def test_parse_verdict_rounds_not_truncates():
+    assert parse_verdict('{"score": 17.9, "reason": "x"}', 18).score == 18
+
+
+def test_parse_verdict_rejects_denominator_mismatch():
+    with pytest.raises((ValueError, ValidationError)):
+        parse_verdict("SCORE: 18/100 - inflated", 18)   # must NOT be read as 18/18
+
+
+def test_parse_verdict_rejects_non_finite():
+    with pytest.raises((ValueError, ValidationError)):
+        parse_verdict('{"score": 1e999, "reason": "x"}', 18)   # 1e999 -> inf
+
+
+# --- end-to-end loop lifecycle (injected worker + judge, mock SQL) ---------
+from engine import graph as _graph_mod
+from engine.graph import build_graph, initial_state
+
+
+class _Seq:
+    """A scripted LLMClient: returns replies in order, repeating the last."""
+    def __init__(self, *replies):
+        self.replies, self.i = list(replies), 0
+
+    def complete(self, prompt, **k):
+        v = self.replies[min(self.i, len(self.replies) - 1)]
+        self.i += 1
+        return v
+
+
+def _mk(monkeypatch, worker, judge, max_iters=2, eval_retries=0):
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
+        "max_score": 18, "pass_score": 18, "max_iters": max_iters,
+        "eval_retries": eval_retries, "default_sql_tool": "mock"})
+    return build_graph("dq_qals", llm=worker, eval_llm=judge, verbose=False)
+
+
+def test_loop_stops_at_pass_score(monkeypatch):
+    g = _mk(monkeypatch, _Seq("A0"), _Seq("SCORE: 18/18 - ok"))
+    f = g.invoke(initial_state("q"))
+    assert f["best_score"] == 18 and f["best_answer"] == "A0" and f["iterations"] == 0
+
+
+def test_loop_preserves_best_answer(monkeypatch):
+    # score drops on refine; best_answer must stay the higher-scored earlier revision
+    g = _mk(monkeypatch, _Seq("A0", "A1"), _Seq("SCORE: 16/18 - x", "SCORE: 10/18 - worse"),
+            max_iters=1)
+    f = g.invoke(initial_state("q"))
+    assert f["best_score"] == 16 and f["best_answer"] == "A0"
+    assert f["answer"] == "A1"                       # latest revision != best_answer
+
+
+def test_loop_respects_max_iters(monkeypatch):
+    g = _mk(monkeypatch, _Seq("A0", "A1", "A2"), _Seq("SCORE: 12/18 - low"), max_iters=2)
+    f = g.invoke(initial_state("q"))
+    assert f["iterations"] == 2 and f["best_score"] == 12
+
+
+def test_loop_survives_malformed_verdict(monkeypatch):
+    g = _mk(monkeypatch, _Seq("A0", "A1"), _Seq("garbage, no score here"), max_iters=1)
+    f = g.invoke(initial_state("q"))
+    assert f["best_score"] == 0                      # fallback score, no crash
+
+
+def test_build_graph_rejects_bad_config(monkeypatch):
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {"max_iters": 99})
+    with pytest.raises(ValueError):                  # max_iters > 10 (recursion safety)
+        build_graph("dq_qals", llm=_Seq("x"), eval_llm=_Seq("SCORE: 1/18 - y"), verbose=False)

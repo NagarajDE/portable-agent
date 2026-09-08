@@ -65,8 +65,10 @@ class PortableAgent(ResponsesAgent):
             raise ValueError("A non-empty user text message is required")
         final = traced_invoke(self.app, initial_state(task), self.use_case)
         remember_run(final, self.use_case)               # episodic capture (best-effort, no-op unless MEMORY_STORE set)
+        # Use the typed Responses output item (not a raw dict) so downstream MLflow/serving
+        # clients get a spec-compliant response.
         return ResponsesAgentResponse(
-            output=[{"role": "assistant", "content": final["best_answer"]}],
+            output=[self.create_text_output_item(final["best_answer"], id=final["run_id"])],
             custom_outputs={"run_id": final["run_id"]})
 
 

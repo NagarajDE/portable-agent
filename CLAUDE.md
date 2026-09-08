@@ -333,13 +333,20 @@ in sync with `git status`.
   examples and unknown `{names}` are left untouched.
 - Keep `agent.py` (the Databricks shell) free of business logic — it should
   only ever import and expose, never contain a prompt string or a rule.
-- The judge's reply is parsed into a validated `Verdict(score, reason)` via
-  `parse_verdict()` in `engine/graph.py` (plain Pydantic, not a regex scrape) — it
-  accepts the house line form `SCORE: N/<max> - <reason>` or a JSON object, re-asks the
-  judge `eval_retries` times on unparseable output, then falls back to score 0. Rubric
-  prompts keep emitting the one-line `SCORE: N/18 - <reason>` form; don't "simplify" the
-  evaluate node back to a bare regex. We use plain Pydantic here on purpose — do NOT
-  pull in an agent framework (Pydantic AI / instructor) for the generic core.
+- The judge is **grounded**: `evaluate()` passes the retrieved `data` into the rubric so the
+  judge can reject fabricated numbers (the rubric marks the candidate answer untrusted and
+  delimits it). The reply is parsed into a validated `Verdict(score, reason)` via
+  `parse_verdict()` (plain Pydantic, not a regex scrape) — accepts the line form
+  `SCORE: N/<max> - <reason>` or a JSON object, **rounds** (not truncates) scores, **rejects a
+  mismatched denominator** and non-finite scores, re-asks `eval_retries` times, then falls back
+  to score 0. Don't "simplify" back to a bare regex, and do NOT pull in an agent framework
+  (Pydantic AI / instructor) for the generic core.
+- **Scoring knobs are separate:** `max_score` (rubric denominator / validation cap, default 18)
+  vs `pass_score` (stop threshold; `threshold` is the backward-compatible alias). `keep_going`
+  stops at `pass_score`; `parse_verdict` validates against `max_score`.
+- **Model-generated SQL is treated as untrusted:** `CortexAnalystTool` runs it only through
+  `_ensure_read_only()` (single statement, SELECT/WITH only) with a `SQL_TIMEOUT_SECONDS` cap —
+  a backstop; the PRIMARY control is granting the service role SELECT-only (see the deploy guide).
 - Keep observability OUT of the loop. `graph.py` nodes are pure; all tracing lives in
   `engine/tracing.py` and is applied via `instrument(...)` (node wrapper) + `traced_invoke`
   (run wrapper). Don't add `tracer.event(...)`, timing, or vendor observability SDKs

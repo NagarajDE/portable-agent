@@ -169,7 +169,7 @@ Real cost of a new agent: one persona paragraph + its own tuning.
 | Hardened judge (typed `Verdict` + retry) | ✅ plain-Pydantic parse/validate, `eval_retries` re-ask, safe fallback; all 4 packs green |
 | Observability (`Tracer` + structured events) | ✅ `engine/tracing.py`, `StdoutTracer` JSON events + `run_id`; otel wired; mlflow/eventtable stubbed; mock verified |
 | Memory (`MemoryStore`: episodic + feedback) | ✅ `engine/memory.py`, none/mock/sqlite verified + `/feedback` endpoint; snowflake adapter coded (untested live); threads/RAG parked |
-| Unit tests (`tests/`) | ✅ 23 tests (memory adapters + fill/verdict), all green via `pytest` |
+| Unit tests (`tests/`) | ✅ 47 tests (memory, fill/verdict strictness, graph lifecycle e2e, SQL read-only, shell/feedback), all green via `pytest` |
 | `CLAUDE.md` (Claude Code project memory) | ✅ built |
 
 ### The three analytics modes we built
@@ -503,3 +503,40 @@ table with hard-reject-on-existing (an upgrade footgun), timeout/deadline plumbi
 every call, MERGE-for-idempotency on UUID keys, blanket redaction of *all* exception
 messages (hurts triage), and `status()`/counters/`purge_before`/FIFO eviction. These fight
 the simplicity we chose (decision #14) without earning their keep for append-only capture.
+
+### 12.11 Second cross-review (35 findings) — applied vs. challenged
+
+A follow-up review (`databricks-gpt-6-astra`, 35 findings) of `main`. Triaged against our
+"simple, production-grade, no over-engineering" bar. **Applied** (correctness/safety, testable):
+- **Judge grounding (#1):** `evaluate()` now passes the retrieved `data` into the rubric;
+  rubric prompts mark the candidate answer untrusted + delimited (light injection defense, #2).
+- **Score model (#3, #4):** split `max_score` (denominator/cap) from `pass_score` (stop);
+  `parse_verdict` rounds not truncates, rejects mismatched denominator + non-finite.
+- **Eval pairing (#7):** an injected worker with no injected judge now reuses the worker (no
+  real-worker-with-mock-judge surprise); env resolution unchanged when nothing is injected.
+- **Process hygiene:** stopped mutating `os.environ["SQL_TOOL"]` (#16, `get_sql_tool(default=)`);
+  `inherits:"shared"` string coerced to list (#17); `_resolve` trims (#13); `max_iters<=10`
+  guard for LangGraph recursion (#15).
+- **Adapters:** Cortex/Databricks return-value guards (#10); Genie fails fast with an actionable
+  message (A2); Databricks uses `create_text_output_item()` (A1).
+- **SQL safety (A8/A9):** `_ensure_read_only()` backstop (SELECT/WITH, single statement) +
+  `SQL_TIMEOUT_SECONDS`; deploy guide now says grant the role SELECT-only (primary control).
+- **Feedback (A3/A4/A7):** `isinstance(NullMemory)` checked before `memory_enabled()` (no crash
+  on invalid backend), rating/note validation, `/healthz` reports `memory_effective`.
+- **Latency (A6):** episodic capture moved to a FastAPI `BackgroundTask` (off the response path).
+- **Tests:** 23 → 47 — graph lifecycle e2e (termination, best-answer preservation, iter cap,
+  malformed verdict), parse strictness, SQL read-only, shell/feedback validation.
+
+**Challenged / not done (with reason):**
+- **A5 multi-turn context / #6 answer-vs-best:** multi-turn is the deliberately parked threads
+  feature; shells already return `best_answer`/`best_score`. By design, not a bug.
+- **#8 auto judge == worker:** by design + documented (independence is opt-in via `EVAL_*`).
+- **#9 mock realism, #14 model_summary logs env:** the mock/log are deterministic display; not
+  production paths.
+- **#11 finish_reason / #12 run-wide deadline:** low value for our short outputs; client-level
+  timeout+retries already added. A deadline is the over-engineering we rejected in §12.10.
+- **A10 typed SQL result:** a string feeds the LLM fine; typing adds surface for no gain now.
+- **A11 import-time side effects:** idiomatic for MLflow Models-from-Code / uvicorn app modules.
+- **A12 sensitive data in traces:** already handled — `TRACE_INCLUDE_CONTENT` defaults off (§12.10).
+- **#5 synthetic score 0:** the `reason` string distinguishes it and best-score tracking means a
+  fallback 0 never overwrites a real best; not worth an extra state flag.

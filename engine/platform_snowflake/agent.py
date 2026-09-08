@@ -16,7 +16,7 @@ Deploy (from a terminal with Snowflake CLI configured):
 """
 import logging
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel, Field, field_validator
 
 from engine.graph import build_graph, initial_state
@@ -59,33 +59,42 @@ class AskResponse(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    run_id: str
-    rating: str                    # e.g. "up" / "down", or "1".."5" — your convention
-    note: str | None = None
+    run_id: str = Field(min_length=1, max_length=64)
+    rating: str = Field(min_length=1, max_length=32)   # e.g. "up"/"down" or "1".."5" — your convention
+    note: str | None = Field(default=None, max_length=2000)
+
+
+def _memory_effective() -> str:
+    """What memory is ACTUALLY doing (NullMemory after a fallback shows as 'none')."""
+    return "none" if isinstance(_memory, NullMemory) else os.getenv("MEMORY_STORE", "none")
 
 
 @app.get("/healthz")
 def healthz():
     return {"status": "ok", "use_case": USE_CASE,
             "tracer": os.getenv("TRACER", "stdout"),
-            "memory": os.getenv("MEMORY_STORE", "none")}
+            "memory": os.getenv("MEMORY_STORE", "none"),
+            "memory_effective": _memory_effective()}
 
 
 @app.post("/invoke", response_model=AskResponse)
-def invoke(req: AskRequest) -> AskResponse:
+def invoke(req: AskRequest, background_tasks: BackgroundTasks) -> AskResponse:
     final = traced_invoke(_graph, initial_state(req.question), USE_CASE)
-    remember_run(final, USE_CASE)                   # episodic capture (best-effort)
+    background_tasks.add_task(remember_run, final, USE_CASE)   # capture OFF the response path
     return AskResponse(answer=final["best_answer"], score=final["best_score"],
                        run_id=final["run_id"])
 
 
 @app.post("/feedback")
 def feedback(req: FeedbackRequest):
-    # Truthful status: don't report "recorded" if memory is off or fell back to NullMemory,
-    # and surface a write failure instead of a false success.
-    if not memory_enabled() or isinstance(_memory, NullMemory):
+    # Truthful status. isinstance() is checked FIRST so a NullMemory fallback short-circuits
+    # before memory_enabled() (which raises on an invalid MEMORY_STORE); the write is wrapped
+    # so a failure surfaces as memory_error, never a false "recorded".
+    if isinstance(_memory, NullMemory):
         return {"status": "memory_disabled", "run_id": req.run_id}
     try:
+        if not memory_enabled():
+            return {"status": "memory_disabled", "run_id": req.run_id}
         _memory.record_feedback(req.run_id, req.rating, req.note or "")
     except Exception:
         logger.exception("feedback persistence failed", extra={"run_id": req.run_id})
