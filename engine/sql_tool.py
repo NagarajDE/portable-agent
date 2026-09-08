@@ -16,7 +16,7 @@ class SQLTool(Protocol):
     def ask(self, question: str) -> str: ...      # returns rows as text
 
 
-def _rows_to_text(rows, max_rows: int = 50) -> str:
+def _rows_to_text(rows, max_rows: int = 100) -> str:
     """Format Snowpark result rows into a compact text block for the LLM to read."""
     if not rows:
         return "No rows."
@@ -62,11 +62,11 @@ class CortexAnalystTool:
             texts = [c.get("text", "") for c in content if c.get("type") == "text"]
             return "\n".join(t for t in texts if t) or "Cortex Analyst returned no SQL."
         sql = _ensure_read_only(sql)                                 # backstop: SELECT-only, single statement
-        max_rows = 50                                                # cap BEFORE collect() to bound memory
+        max_rows = int(os.getenv("SQL_MAX_ROWS", "100"))             # how many result rows the LLM sees
         timeout = int(os.getenv("SQL_TIMEOUT_SECONDS", "30"))        # bound warehouse time for a runaway query
-        rows = self._s.sql(sql).limit(max_rows + 1).collect(
+        rows = self._s.sql(sql).limit(max_rows + 1).collect(         # cap BEFORE collect() to bound memory
             statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": str(timeout)})
-        text = _rows_to_text(rows[:max_rows])
+        text = _rows_to_text(rows[:max_rows], max_rows)
         return text + ("\n... (additional rows omitted)" if len(rows) > max_rows else "")
 
 
