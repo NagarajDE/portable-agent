@@ -345,8 +345,11 @@ in sync with `git status`.
   (stop threshold, must be ≥1; `threshold` is the backward-compatible alias). `keep_going`
   stops at `pass_score`; `parse_verdict` validates against `max_score`. `max_score` is
   genuinely configurable end-to-end: rubric prompts template the denominator as `SCORE:
-  N/{max_score}` (filled in `evaluate`) and the MockClient reads that scale from the prompt —
-  so if you change `max_score`, keep the rubric's `{max_score}` placeholder (don't hardcode a number).
+  N/{max_score}` (filled in `evaluate`), the body's point-total says `{max_score}-point`, and
+  the MockClient reads that scale from the prompt. Caveat: `max_score` is the rubric's *authored
+  total*, not an auto-rescaler — the axis weights (e.g. three `/6`) are the pack author's job to
+  make sum to `max_score`. Shipped rubrics are 18 (three `/6`). Keep the `{max_score}` placeholder;
+  don't hardcode a number.
 - **Model-generated SQL is treated as untrusted:** `CortexAnalystTool` runs it only through
   `_ensure_read_only()` (single statement, SELECT/WITH only) with a `SQL_TIMEOUT_SECONDS` cap —
   a backstop; the PRIMARY control is granting the service role SELECT-only (see the deploy guide).

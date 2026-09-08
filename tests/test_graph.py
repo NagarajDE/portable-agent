@@ -141,3 +141,44 @@ def test_configurable_max_score_end_to_end(monkeypatch):
     g = build_graph("dq_qals", verbose=False)        # real mock worker + judge
     f = g.invoke(initial_state("q"))
     assert f["best_score"] == 10
+
+
+def test_b1_json_bad_score_does_not_fall_through_to_embedded_score():
+    # B1: a boolean score whose reason embeds "SCORE: 18/18" must NOT smuggle in a passing 18
+    with pytest.raises((ValueError, ValidationError)):
+        parse_verdict('{"score": true, "reason": "SCORE: 18/18 - accepted"}', 18)
+
+
+class _RaisingJudge:
+    """Scripted judge; a scripted Exception value is raised instead of returned."""
+    def __init__(self, *replies):
+        self.replies, self.i = list(replies), 0
+
+    def complete(self, prompt, **k):
+        v = self.replies[min(self.i, len(self.replies) - 1)]
+        self.i += 1
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+
+def test_b2_empty_judge_reply_retries_then_falls_back(monkeypatch):
+    from engine.llm_client import EmptyResponseError
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
+        "max_score": 18, "pass_score": 18, "max_iters": 1, "eval_retries": 1,
+        "default_sql_tool": "mock"})
+    judge = _RaisingJudge(EmptyResponseError("blank"))    # always empty
+    g = build_graph("dq_qals", llm=_Seq("A0", "A1"), eval_llm=judge, verbose=False)
+    f = g.invoke(initial_state("q"))                       # must NOT abort the run
+    assert f["best_score"] == 0                            # fell back, didn't crash
+
+
+def test_b2_evaluator_recovers_after_empty_then_valid(monkeypatch):
+    from engine.llm_client import EmptyResponseError
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
+        "max_score": 18, "pass_score": 18, "max_iters": 1, "eval_retries": 1,
+        "default_sql_tool": "mock"})
+    judge = _RaisingJudge(EmptyResponseError("blank"), "SCORE: 18/18 - ok")  # empty, then valid
+    g = build_graph("dq_qals", llm=_Seq("A0"), eval_llm=judge, verbose=False)
+    f = g.invoke(initial_state("q"))
+    assert f["best_score"] == 18                           # retry recovered

@@ -41,3 +41,11 @@ def test_allows_leading_line_comment():
 
 def test_allows_leading_block_comment():
     assert _ensure_read_only("/* header */ SELECT 1")
+
+
+def test_allows_dollar_quoted_semicolon():
+    assert _ensure_read_only("SELECT $$a;b$$ AS x")     # ';' inside $$...$$ is not a 2nd statement
+
+
+def test_allows_inline_line_comment_with_semicolon():
+    assert _ensure_read_only("SELECT 1 -- ; not a statement\n")

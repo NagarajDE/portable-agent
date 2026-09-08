@@ -31,6 +31,12 @@ class LLMClient(Protocol):
     def complete(self, prompt: str, **kw) -> str: ...
 
 
+class EmptyResponseError(RuntimeError):
+    """A provider returned an empty / whitespace-only completion. A distinct type so the
+    evaluator retry loop can retry THIS (a bad response shape) without also swallowing
+    auth/config errors, which stay as their own exception types and propagate."""
+
+
 # --------------------------------------------------------------------------
 # MOCK -- deterministic, zero credentials. Fakes an LLM that drafts, then
 # improves each refine round, and a judge whose score climbs with revision.
@@ -97,7 +103,7 @@ class AnthropicClient:
             raise RuntimeError("Anthropic output truncated (hit max_tokens); raise LLM_MAX_TOKENS")
         text = "\n".join(b.text for b in r.content if b.type == "text").strip()
         if not text:                                    # don't return an empty/None answer
-            raise RuntimeError("Anthropic returned no text content")
+            raise EmptyResponseError("Anthropic returned no text content")
         return text
 
 
@@ -112,7 +118,7 @@ class CortexClient:
                           params=[self._model, prompt]).collect()[0]
         text = row["R"]
         if not text or not str(text).strip():
-            raise RuntimeError("Cortex COMPLETE returned no text")
+            raise EmptyResponseError("Cortex COMPLETE returned no text")
         return text
 
 
@@ -142,7 +148,7 @@ class DatabricksClient:
             raise RuntimeError("Databricks output truncated (finish_reason=length); raise LLM_MAX_TOKENS")
         text = choice.message.content if choice else None
         if not text or not text.strip():
-            raise RuntimeError("Databricks endpoint returned no text content")
+            raise EmptyResponseError("Databricks endpoint returned no text content")
         return text
 
 
@@ -235,10 +241,12 @@ def get_llm_client(use_case: str | None = None) -> LLMClient:
 
 
 def get_eval_client(use_case: str | None = None) -> LLMClient:
-    """The EVALUATOR: scores against the rubric. Judge independence is CONFIGURABLE (not
-    automatic): SYMMETRIC to the worker knobs, and both default to the worker, so leaving
-    them 'auto' means the worker grades its own output — set EVAL_PROVIDER/EVAL_MODEL to a
-    different model to get a genuinely independent judge:
+    """The EVALUATOR: scores against the rubric. Judge independence is CONFIGURABLE, not
+    automatic. Defaults: EVAL_PROVIDER 'auto' -> the WORKER's provider; EVAL_MODEL 'auto' ->
+    that provider's default model (NOT necessarily a pinned WORKER_MODEL). So with everything
+    'auto' the judge shares the worker's provider (and its model too, when WORKER_MODEL is
+    also 'auto') -- i.e. the worker grades its own output. Set EVAL_PROVIDER / EVAL_MODEL to
+    a different model for a genuinely independent judge:
         EVAL_PROVIDER   evaluator provider   (auto -> same as WORKER_PROVIDER)
         EVAL_MODEL      evaluator model      (auto -> that provider's default)
     Lets you judge with a different model on the SAME provider, or a different

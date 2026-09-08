@@ -19,7 +19,8 @@ import yaml
 from pydantic import BaseModel, ValidationError, field_validator
 from langgraph.graph import StateGraph, END
 
-from engine.llm_client import get_llm_client, get_eval_client, model_summary, LLMClient
+from engine.llm_client import (get_llm_client, get_eval_client, model_summary,
+                                LLMClient, EmptyResponseError)
 from engine.sql_tool import get_sql_tool, SQLTool
 from engine.tracing import instrument       # observability is applied from OUTSIDE the nodes
 
@@ -119,19 +120,22 @@ def parse_verdict(raw: str, max_score: int) -> Verdict:
     rubric prompt (the candidate answer is delimited + marked untrusted) plus JSON-first parsing.
     Raises ValueError / ValidationError on anything unparseable or out of range (caller retries)."""
     text = (raw or "").strip()
-    data: dict | None = None
 
-    m = re.search(r"\{.*\}", text, re.DOTALL)          # 1) JSON object anywhere
+    obj = None                                         # 1) JSON object anywhere
+    m = re.search(r"\{.*\}", text, re.DOTALL)
     if m:
         try:
             obj = json.loads(m.group(0))
-            if isinstance(obj, dict) and "score" in obj:
-                data = {"score": _coerce_score(obj["score"]),
-                        "reason": str(obj.get("reason", "")).strip()}
         except (ValueError, TypeError):
-            data = None
+            obj = None
 
-    if data is None:                                   # 2) line form: SCORE: N[/denom] - reason
+    if isinstance(obj, dict) and "score" in obj:
+        # A JSON verdict is AUTHORITATIVE: its score wins and a bad score RAISES here (so the
+        # caller retries / falls back). We must NOT fall through to line-form, or an embedded
+        # "SCORE: 18/18" inside the reason text could smuggle in a passing score (B1).
+        verdict = Verdict(score=_coerce_score(obj["score"]),
+                          reason=str(obj.get("reason", "")).strip())
+    else:                                              # 2) line form: SCORE: N[/denom] - reason
         m = re.search(r"SCORE:\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*([0-9]+))?\s*[-–—:]*\s*([^\n]*)",
                       text, re.IGNORECASE)
         if not m:
@@ -139,9 +143,8 @@ def parse_verdict(raw: str, max_score: int) -> Verdict:
         denom = m.group(2)
         if denom is not None and int(denom) != max_score:
             raise ValueError(f"denominator {denom} != max_score {max_score}")
-        data = {"score": _coerce_score(m.group(1)), "reason": m.group(3).strip() or text}
+        verdict = Verdict(score=_coerce_score(m.group(1)), reason=m.group(3).strip() or text)
 
-    verdict = Verdict(**data)
     if verdict.score > max_score:
         raise ValueError(f"score {verdict.score} exceeds max {max_score}")
     return verdict
@@ -211,12 +214,15 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
                     max_score=max_score)               # rubric's denominator matches the configured scale
         verdict: Verdict | None = None
         for attempt in range(eval_retries + 1):
-            raw = eval_llm.complete(base if attempt == 0 else base + retry_nudge)
             try:
+                # complete() is INSIDE the try so an empty/whitespace judge reply
+                # (EmptyResponseError) is retried and then falls back, instead of aborting
+                # the run (B2). Auth/config errors are other types and still propagate.
+                raw = eval_llm.complete(base if attempt == 0 else base + retry_nudge)
                 verdict = parse_verdict(raw, max_score)
                 break
-            except (ValueError, ValidationError) as e:
-                log(f"  [evaluate] unparseable verdict "
+            except (ValueError, ValidationError, EmptyResponseError) as e:
+                log(f"  [evaluate] unusable verdict "
                     f"(attempt {attempt + 1}/{eval_retries + 1}): {e}")
         if verdict is None:                            # retries exhausted -> safe worst case
             verdict = Verdict(score=0,

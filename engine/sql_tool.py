@@ -44,8 +44,13 @@ def _ensure_read_only(sql: str) -> str:
     stripped = stripped.rstrip(";").strip()
     if not re.match(r"(?is)^(select|with)\b", stripped):
         raise ValueError("refusing non-SELECT SQL from the model (read-only heuristic)")
-    without_strings = re.sub(r"'(?:[^']|'')*'", "", stripped)   # ignore ';' inside 'literals'
-    if ";" in without_strings:
+    # For the multi-statement check only, blank out comments and string literals so a ';'
+    # inside them isn't a false positive (single-quoted, $$dollar-quoted$$, --line, /*block*/).
+    check = re.sub(r"--[^\n]*", "", stripped)
+    check = re.sub(r"/\*.*?\*/", "", check, flags=re.DOTALL)
+    check = re.sub(r"'(?:[^']|'')*'", "", check)
+    check = re.sub(r"\$\$.*?\$\$", "", check, flags=re.DOTALL)
+    if ";" in check:
         raise ValueError("refusing multi-statement SQL from the model")
     return stripped
 

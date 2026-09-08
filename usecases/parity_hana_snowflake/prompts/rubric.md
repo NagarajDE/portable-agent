@@ -1,4 +1,4 @@
-SCORE THE ANSWER on an 18-point rubric: correctness of mismatch /6,
+SCORE THE ANSWER on a {max_score}-point rubric: correctness of mismatch /6,
 exactness of the delta /6, clarity /6.
 Reply with exactly one line:  SCORE: N/{max_score} - <short reason>
 

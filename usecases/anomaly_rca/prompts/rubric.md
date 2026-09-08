@@ -1,4 +1,4 @@
-SCORE THE ANSWER on an 18-point root-cause rubric, 0-6 on each axis.
+SCORE THE ANSWER on a {max_score}-point root-cause rubric, 0-6 on each axis.
 
 1. Hypothesis quality /6
    - Candidate causes are plausible, specific, and prioritized across the right

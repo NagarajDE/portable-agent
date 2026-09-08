@@ -169,7 +169,7 @@ Real cost of a new agent: one persona paragraph + its own tuning.
 | Hardened judge (typed `Verdict` + retry) | ✅ plain-Pydantic parse/validate, `eval_retries` re-ask, safe fallback; all 4 packs green |
 | Observability (`Tracer` + structured events) | ✅ `engine/tracing.py`, `StdoutTracer` JSON events + `run_id`; otel wired; mlflow/eventtable stubbed; mock verified |
 | Memory (`MemoryStore`: episodic + feedback) | ✅ `engine/memory.py`, none/mock/sqlite verified + `/feedback` endpoint; snowflake adapter coded (untested live); threads/RAG parked |
-| Unit tests (`tests/`) | ✅ 55 tests (memory, fill/verdict strictness, graph lifecycle e2e, configurable max_score, SQL read-only + false-positive tolerance, shell/feedback), env-isolated via conftest |
+| Unit tests (`tests/`) | ✅ 60 tests (memory, fill/verdict strictness incl. B1, graph lifecycle e2e, evaluator empty-reply retry/recovery, configurable max_score, SQL read-only + false-positive tolerance, shell/feedback), env+singleton isolated via conftest |
 | `CLAUDE.md` (Claude Code project memory) | ✅ built |
 
 ### The three analytics modes we built
@@ -573,3 +573,29 @@ the judge); #10 — providers reject whitespace-only replies; A4 — feedback re
   Both left as documented limitations, not worth the machinery now.
 - **R2 eval-failure-as-best / R3 transport errors:** mitigated (pass_score≥1 + best-score tracking;
   client-level timeout+retries). A run-wide deadline stays deferred until a hard SLA (agreed in §12.11).
+
+### 12.13 Fourth review — two more regressions my Round-3 fixes introduced, fixed
+
+The review of §12.12's fixes found two real bugs my own changes created — owned and fixed:
+- **B1 (med): boolean/invalid JSON score fell through to line-form and grabbed an embedded
+  `SCORE: 18/18` from the reason text.** `parse_verdict` now treats a JSON object with a `score`
+  key as **authoritative** — a bad score raises (caller retries / falls back) instead of falling
+  through to the line-form regex on the same text.
+- **B2 (med): the #10 whitespace guard raised outside the evaluator retry loop**, so an empty judge
+  reply aborted the run and bypassed the fallback. Added `EmptyResponseError` (raised by the empty
+  guards); `evaluate()` now calls `complete()` inside the try and catches it — empty replies retry
+  then fall back, while auth/config errors (other types) still propagate. Tested both the fall-back
+  and the retry-recovery paths (which also closed the "all tests use eval_retries=0" gap).
+
+**Partials closed:** N1 — rubric bodies now say `{max_score}-point` (total tracks the scale);
+documented that `max_score` is the *authored* total, not an auto-rescaler (axis weights are the
+pack author's job — reweighting them automatically would be the over-engineering the review itself
+flagged). N4 — the multi-statement heuristic now ignores `;` inside `$$dollar-quoted$$` strings and
+line/block comments too. N5 — `conftest` now also isolates `USE_CASE` and resets the memory
+singleton around every test. #8 — docstring corrected (EVAL_MODEL 'auto' → provider default, not a
+pinned WORKER_MODEL). Tests 55 → **60**.
+
+**Confirmed by the reviewer:** #6 (shells return `best_answer`) and A6 (sync `predict` is correct by
+the MLflow contract) — both previously-challenged rejections now verified correct. Still honestly
+open: Databricks adapter `predict()` remains untested here (no MLflow/workspace); Cortex string
+`COMPLETE` truncation undetectable without its structured form; run-wide deadline deferred.

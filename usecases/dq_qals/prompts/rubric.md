@@ -1,4 +1,4 @@
-SCORE THE ANSWER on an 18-point data-quality rubric, 0-6 on each axis.
+SCORE THE ANSWER on a {max_score}-point data-quality rubric, 0-6 on each axis.
 
 1. Rule correctness /6
    - Correct DQ dimension for the question: completeness (nulls), uniqueness
