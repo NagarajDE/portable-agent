@@ -63,6 +63,13 @@ class FeedbackRequest(BaseModel):
     rating: str = Field(min_length=1, max_length=32)   # e.g. "up"/"down" or "1".."5" — your convention
     note: str | None = Field(default=None, max_length=2000)
 
+    @field_validator("run_id", "rating")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        if not v.strip():                              # "   " passes min_length but is still blank
+            raise ValueError("must not be blank")
+        return v.strip()
+
 
 def _memory_effective() -> str:
     """What memory is ACTUALLY doing (NullMemory after a fallback shows as 'none')."""

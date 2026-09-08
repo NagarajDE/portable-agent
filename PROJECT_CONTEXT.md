@@ -169,7 +169,7 @@ Real cost of a new agent: one persona paragraph + its own tuning.
 | Hardened judge (typed `Verdict` + retry) | ✅ plain-Pydantic parse/validate, `eval_retries` re-ask, safe fallback; all 4 packs green |
 | Observability (`Tracer` + structured events) | ✅ `engine/tracing.py`, `StdoutTracer` JSON events + `run_id`; otel wired; mlflow/eventtable stubbed; mock verified |
 | Memory (`MemoryStore`: episodic + feedback) | ✅ `engine/memory.py`, none/mock/sqlite verified + `/feedback` endpoint; snowflake adapter coded (untested live); threads/RAG parked |
-| Unit tests (`tests/`) | ✅ 47 tests (memory, fill/verdict strictness, graph lifecycle e2e, SQL read-only, shell/feedback), all green via `pytest` |
+| Unit tests (`tests/`) | ✅ 55 tests (memory, fill/verdict strictness, graph lifecycle e2e, configurable max_score, SQL read-only + false-positive tolerance, shell/feedback), env-isolated via conftest |
 | `CLAUDE.md` (Claude Code project memory) | ✅ built |
 
 ### The three analytics modes we built
@@ -540,3 +540,36 @@ A follow-up review (`databricks-gpt-6-astra`, 35 findings) of `main`. Triaged ag
 - **A12 sensitive data in traces:** already handled — `TRACE_INCLUDE_CONTENT` defaults off (§12.10).
 - **#5 synthetic score 0:** the `reason` string distinguishes it and best-score tracking means a
   fallback 0 never overwrites a real best; not worth an extra state flag.
+
+### 12.12 Third review — regressions I introduced, fixed; partials + rebuttals
+
+The next review checked §12.11's own fixes. It **correctly caught real regressions** my changes
+introduced — owned and fixed:
+- **N1 (high):** configurable `max_score` contradicted the hard-coded `/18` rubrics + mock, so any
+  non-18 scale failed every verdict. Fixed properly: rubric denominators are templated
+  `SCORE: N/{max_score}` (filled in `evaluate`) and `MockClient` reads the scale from the prompt —
+  now verified end-to-end at `max_score=10`.
+- **N2 (med):** `pass_score=0` let a fallback-0 "pass" and stop instantly → `pass_score` must be ≥1.
+- **N3 (med):** a huge JSON integer raised an uncaught `OverflowError` → `_coerce_score` catches it
+  (and now also rejects bools, so `{"score": true}` isn't read as 1).
+- **N4 (low):** the SQL guard false-rejected `SELECT ';'` and comment-prefixed queries → it now
+  strips leading comments and ignores semicolons inside string literals; reframed explicitly as a
+  defense-in-depth **heuristic, not a security boundary** (the SELECT-only grant is the control).
+- **N5 (med):** tests leaked env at collection → added `tests/conftest.py` (autouse env isolation)
+  and rewrote the shell test with `monkeypatch` + `importlib.reload`.
+
+**Partials pushed further:** R1 — the *refiner* now also gets `data` + evidence (was grounding only
+the judge); #10 — providers reject whitespace-only replies; A4 — feedback rejects blank/whitespace
+`run_id`/`rating`; A9 — `SQL_TIMEOUT_SECONDS`/`SQL_MAX_ROWS` clamped to ≥1; #8 — docstring corrected
+("independence is configurable," not automatic). Tests 47 → **55**.
+
+**Rebutted / deferred:**
+- **#6 "shells return best_answer" (marked INVALID REJECTION):** actually verified — both shells
+  return `final["best_answer"]`/`best_score` (`platform_snowflake/agent.py`, `platform_databricks/agent.py`).
+  The reviewer couldn't see the shells; it is not a bug.
+- **A6 Databricks async / #11 Cortex truncation:** the Databricks `predict()` is synchronous by the
+  MLflow contract and `remember_run` is fail-safe + a no-op there by default (no Delta store, parked);
+  Cortex's string `COMPLETE` exposes no finish reason without switching to its structured form.
+  Both left as documented limitations, not worth the machinery now.
+- **R2 eval-failure-as-best / R3 transport errors:** mitigated (pass_score≥1 + best-score tracking;
+  client-level timeout+retries). A run-wide deadline stays deferred until a hard SLA (agreed in §12.11).

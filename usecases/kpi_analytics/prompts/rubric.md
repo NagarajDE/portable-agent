@@ -16,7 +16,7 @@ SCORE THE ANSWER on an 18-point metric-analytics rubric, 0-6 on each axis.
    - Number stated with units and the filters/slice applied; enough context to
      interpret (trend direction, comparison value, caveats).
 
-Reply with exactly one line: SCORE: N/18 - <short reason>
+Reply with exactly one line: SCORE: N/{max_score} - <short reason>
 
 Penalize any number/claim NOT supported by the EVIDENCE below (fabrication = low accuracy).
 

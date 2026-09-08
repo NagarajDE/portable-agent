@@ -59,6 +59,17 @@ def test_parse_verdict_rejects_non_finite():
         parse_verdict('{"score": 1e999, "reason": "x"}', 18)   # 1e999 -> inf
 
 
+def test_parse_verdict_rejects_bool():
+    with pytest.raises((ValueError, ValidationError)):
+        parse_verdict('{"score": true, "reason": "x"}', 18)    # True must not become 1
+
+
+def test_parse_verdict_rejects_huge_integer():
+    huge = "9" * 401                                            # OverflowError on float(), must be caught
+    with pytest.raises((ValueError, ValidationError)):
+        parse_verdict('{"score": ' + huge + ', "reason": "x"}', 18)
+
+
 # --- end-to-end loop lifecycle (injected worker + judge, mock SQL) ---------
 from engine import graph as _graph_mod
 from engine.graph import build_graph, initial_state
@@ -113,3 +124,20 @@ def test_build_graph_rejects_bad_config(monkeypatch):
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {"max_iters": 99})
     with pytest.raises(ValueError):                  # max_iters > 10 (recursion safety)
         build_graph("dq_qals", llm=_Seq("x"), eval_llm=_Seq("SCORE: 1/18 - y"), verbose=False)
+
+
+def test_build_graph_rejects_pass_score_zero(monkeypatch):
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {"pass_score": 0})
+    with pytest.raises(ValueError):                  # pass_score 0 would let a fallback-0 "pass"
+        build_graph("dq_qals", llm=_Seq("x"), eval_llm=_Seq("SCORE: 1/18 - y"), verbose=False)
+
+
+def test_configurable_max_score_end_to_end(monkeypatch):
+    # max_score=10 must work end-to-end: the templated rubric declares /10 and the MOCK judge
+    # honors that scale, so the verdict parses (no denominator-mismatch fallback-to-0).
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
+        "max_score": 10, "pass_score": 10, "max_iters": 2, "eval_retries": 0,
+        "default_sql_tool": "mock"})
+    g = build_graph("dq_qals", verbose=False)        # real mock worker + judge
+    f = g.invoke(initial_state("q"))
+    assert f["best_score"] == 10

@@ -341,9 +341,12 @@ in sync with `git status`.
   mismatched denominator** and non-finite scores, re-asks `eval_retries` times, then falls back
   to score 0. Don't "simplify" back to a bare regex, and do NOT pull in an agent framework
   (Pydantic AI / instructor) for the generic core.
-- **Scoring knobs are separate:** `max_score` (rubric denominator / validation cap, default 18)
-  vs `pass_score` (stop threshold; `threshold` is the backward-compatible alias). `keep_going`
-  stops at `pass_score`; `parse_verdict` validates against `max_score`.
+- **Scoring knobs are separate:** `max_score` (validation cap, default 18) vs `pass_score`
+  (stop threshold, must be ≥1; `threshold` is the backward-compatible alias). `keep_going`
+  stops at `pass_score`; `parse_verdict` validates against `max_score`. `max_score` is
+  genuinely configurable end-to-end: rubric prompts template the denominator as `SCORE:
+  N/{max_score}` (filled in `evaluate`) and the MockClient reads that scale from the prompt —
+  so if you change `max_score`, keep the rubric's `{max_score}` placeholder (don't hardcode a number).
 - **Model-generated SQL is treated as untrusted:** `CortexAnalystTool` runs it only through
   `_ensure_read_only()` (single statement, SELECT/WITH only) with a `SQL_TIMEOUT_SECONDS` cap —
   a backstop; the PRIMARY control is granting the service role SELECT-only (see the deploy guide).

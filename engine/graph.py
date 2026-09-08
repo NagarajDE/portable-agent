@@ -98,11 +98,14 @@ class Verdict(BaseModel):
 
 
 def _coerce_score(value) -> int:
-    """A score must be a finite number; round to the nearest int (don't truncate 17.9->17)."""
+    """A score must be a finite number; round to nearest int (don't truncate 17.9->17).
+    Rejects bools (True would become 1) and catches OverflowError from huge JSON integers."""
+    if isinstance(value, bool):
+        raise ValueError("score must be a number, not a boolean")
     try:
         f = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"score is not numeric: {value!r}")
+    except (TypeError, ValueError, OverflowError):      # OverflowError: 400-digit JSON int
+        raise ValueError(f"score is not a finite number: {value!r}")
     if not math.isfinite(f):
         raise ValueError("score must be finite")
     return round(f)
@@ -166,10 +169,10 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     pass_score = cfg.get("pass_score", cfg.get("threshold", max_score))
     max_iters = cfg.get("max_iters", 4)
     eval_retries = cfg.get("eval_retries", 1)          # extra judge re-asks on unparseable output
-    for _name, _val, _min in (("max_score", max_score, 1), ("pass_score", pass_score, 0),
+    for _name, _val, _min in (("max_score", max_score, 1), ("pass_score", pass_score, 1),
                               ("max_iters", max_iters, 0), ("eval_retries", eval_retries, 0)):
         if type(_val) is not int or _val < _min:       # `type is not int` also rejects bools
-            raise ValueError(f"{_name} must be an integer >= {_min}")
+            raise ValueError(f"{_name} must be an integer >= {_min}")   # pass_score>=1: 0 would let a fallback-0 "pass"
     if pass_score > max_score:
         raise ValueError("pass_score must be <= max_score")
     if max_iters > 10:                                 # keep graph steps under LangGraph's default recursion limit (25)
@@ -204,7 +207,8 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         # Ground the judge: give it the DATA the answer must be consistent with, so a
         # fabricated number can't satisfy the rubric (the judge can check against evidence).
         base = fill(_prompt(use_case, "rubric.md"),
-                    task=s["task"], answer=s["answer"], data=s.get("data", ""))
+                    task=s["task"], answer=s["answer"], data=s.get("data", ""),
+                    max_score=max_score)               # rubric's denominator matches the configured scale
         verdict: Verdict | None = None
         for attempt in range(eval_retries + 1):
             raw = eval_llm.complete(base if attempt == 0 else base + retry_nudge)
@@ -228,7 +232,7 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     def refine(s: State) -> State:
         nxt = s["iterations"] + 1
         answer = llm.complete(fill(_prompt(use_case, "refine.md"),
-                                   task=s["task"], answer=s["answer"],
+                                   task=s["task"], answer=s["answer"], data=s.get("data", ""),
                                    feedback=s["feedback"], skills=skills, revision=nxt))
         log(f"  [refine]   rev{nxt} -> {answer}")
         return {**s, "answer": answer, "iterations": nxt}

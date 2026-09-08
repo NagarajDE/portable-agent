@@ -28,3 +28,16 @@ def test_strips_trailing_semicolon():
 def test_rejects_writes_and_multistatement(bad):
     with pytest.raises(ValueError):
         _ensure_read_only(bad)
+
+
+# N4: legitimate SELECTs must NOT be rejected as false positives
+def test_allows_semicolon_inside_string_literal():
+    assert _ensure_read_only("SELECT ';' AS delimiter")
+
+
+def test_allows_leading_line_comment():
+    assert _ensure_read_only("-- pick one\nSELECT 1")
+
+
+def test_allows_leading_block_comment():
+    assert _ensure_read_only("/* header */ SELECT 1")

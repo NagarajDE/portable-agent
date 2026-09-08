@@ -15,7 +15,7 @@ SCORE THE ANSWER on an 18-point root-cause rubric, 0-6 on each axis.
    - Lands on the most-supported cause with its quantified contribution, states a
      confidence level, and gives a concrete next check or fix.
 
-Reply with exactly one line: SCORE: N/18 - <short reason>
+Reply with exactly one line: SCORE: N/{max_score} - <short reason>
 
 Penalize any number/claim NOT supported by the EVIDENCE below (fabrication = low accuracy).
 

@@ -29,14 +29,24 @@ def _rows_to_text(rows, max_rows: int = 100) -> str:
 
 
 def _ensure_read_only(sql: str) -> str:
-    """Backstop before executing model-generated SQL: exactly one statement, and it must be
-    a read-only SELECT/WITH. The PRIMARY control is granting the service role SELECT-only
-    (see the deploy guide); this just stops an obvious write/multi-statement slipping through."""
-    stripped = sql.strip().rstrip(";").strip()
-    if ";" in stripped:
+    """Defense-in-depth HEURISTIC, not a security boundary: reject obvious writes and
+    multi-statement SQL from the model. The REAL control is granting the service role
+    SELECT-only (see the deploy guide) — a determined bypass of a heuristic is possible;
+    a read-only grant is not. Tolerates leading comments and semicolons inside string
+    literals so it doesn't reject legitimate SELECTs."""
+    stripped = sql.strip()
+    while True:                                          # drop leading -- and /* */ comments
+        s2 = re.sub(r"^\s*--[^\n]*\n?", "", stripped)
+        s2 = re.sub(r"^\s*/\*.*?\*/\s*", "", s2, flags=re.DOTALL)
+        if s2 == stripped:
+            break
+        stripped = s2
+    stripped = stripped.rstrip(";").strip()
+    if not re.match(r"(?is)^(select|with)\b", stripped):
+        raise ValueError("refusing non-SELECT SQL from the model (read-only heuristic)")
+    without_strings = re.sub(r"'(?:[^']|'')*'", "", stripped)   # ignore ';' inside 'literals'
+    if ";" in without_strings:
         raise ValueError("refusing multi-statement SQL from the model")
-    if not re.match(r"(?is)^\s*(select|with)\b", stripped):
-        raise ValueError("refusing non-SELECT SQL from the model (read-only only)")
     return stripped
 
 
@@ -62,8 +72,8 @@ class CortexAnalystTool:
             texts = [c.get("text", "") for c in content if c.get("type") == "text"]
             return "\n".join(t for t in texts if t) or "Cortex Analyst returned no SQL."
         sql = _ensure_read_only(sql)                                 # backstop: SELECT-only, single statement
-        max_rows = int(os.getenv("SQL_MAX_ROWS", "100"))             # how many result rows the LLM sees
-        timeout = int(os.getenv("SQL_TIMEOUT_SECONDS", "30"))        # bound warehouse time for a runaway query
+        max_rows = max(1, int(os.getenv("SQL_MAX_ROWS", "100")))     # how many result rows the LLM sees
+        timeout = max(1, int(os.getenv("SQL_TIMEOUT_SECONDS", "30")))  # >=1: timeout=0 must not remove the bound
         rows = self._s.sql(sql).limit(max_rows + 1).collect(         # cap BEFORE collect() to bound memory
             statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": str(timeout)})
         text = _rows_to_text(rows[:max_rows], max_rows)

@@ -1,6 +1,6 @@
 SCORE THE ANSWER on an 18-point rubric: accuracy /6, specificity /6, clarity /6.
 Penalize any factual claim/number NOT supported by the EVIDENCE below (fabrication = low accuracy).
-Reply with exactly one line:  SCORE: N/18 - <short reason>
+Reply with exactly one line:  SCORE: N/{max_score} - <short reason>
 
 QUESTION: {task}
 

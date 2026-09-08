@@ -43,7 +43,9 @@ class MockClient:
     def complete(self, prompt: str, **kw) -> str:
         if "SCORE THE ANSWER" in prompt:                     # judge call
             rev = _answer_rev(prompt)
-            return f"SCORE: {min(12 + 2 * rev, 18)}/18 - mock judge on rev {rev}"
+            m = re.search(r"SCORE:\s*N\s*/\s*(\d+)", prompt)  # honor the rubric's declared scale
+            cap = int(m.group(1)) if m else 18
+            return f"SCORE: {min(12 + 2 * rev, cap)}/{cap} - mock judge on rev {rev}"
         n = _next_rev(prompt)                                # generate / refine call
         text = self.canned["refined"] if "IMPROVE" in prompt else self.canned["draft"]
         return f"{text} [rev {n}]"
@@ -109,7 +111,7 @@ class CortexClient:
         row = self._s.sql("SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS R",
                           params=[self._model, prompt]).collect()[0]
         text = row["R"]
-        if not text:
+        if not text or not str(text).strip():
             raise RuntimeError("Cortex COMPLETE returned no text")
         return text
 
@@ -139,7 +141,7 @@ class DatabricksClient:
         if choice and choice.finish_reason == "length":  # truncated: don't treat as complete
             raise RuntimeError("Databricks output truncated (finish_reason=length); raise LLM_MAX_TOKENS")
         text = choice.message.content if choice else None
-        if not text:
+        if not text or not text.strip():
             raise RuntimeError("Databricks endpoint returned no text content")
         return text
 
@@ -233,9 +235,10 @@ def get_llm_client(use_case: str | None = None) -> LLMClient:
 
 
 def get_eval_client(use_case: str | None = None) -> LLMClient:
-    """The EVALUATOR: scores against the rubric, chosen INDEPENDENTLY of the worker
-    so a model never grades its own output. SYMMETRIC to the worker knobs; both
-    default to the worker, so leaving them 'auto' keeps evaluator == worker:
+    """The EVALUATOR: scores against the rubric. Judge independence is CONFIGURABLE (not
+    automatic): SYMMETRIC to the worker knobs, and both default to the worker, so leaving
+    them 'auto' means the worker grades its own output — set EVAL_PROVIDER/EVAL_MODEL to a
+    different model to get a genuinely independent judge:
         EVAL_PROVIDER   evaluator provider   (auto -> same as WORKER_PROVIDER)
         EVAL_MODEL      evaluator model      (auto -> that provider's default)
     Lets you judge with a different model on the SAME provider, or a different
