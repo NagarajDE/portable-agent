@@ -71,9 +71,12 @@ def load_exemplars(use_case: str) -> str:
 
 
 def fill(template: str, **kw) -> str:
-    for k, v in kw.items():
-        template = template.replace("{" + k + "}", str(v))
-    return template
+    """Single-pass placeholder fill: replace each {key} with its kwarg in ONE pass, so a
+    substituted value that itself contains "{other}" is never re-interpreted, and literal
+    braces in SQL/JSON examples (or unknown {names}) are left untouched (brace-safe)."""
+    return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)\}",
+                  lambda m: str(kw[m.group(1)]) if m.group(1) in kw else m.group(0),
+                  template)
 
 
 class Verdict(BaseModel):
@@ -140,6 +143,10 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     threshold = cfg.get("threshold", 18)
     max_iters = cfg.get("max_iters", 4)
     eval_retries = cfg.get("eval_retries", 1)          # extra judge re-asks on unparseable output
+    for _name, _val, _min in (("threshold", threshold, 1), ("max_iters", max_iters, 0),
+                              ("eval_retries", eval_retries, 0)):
+        if type(_val) is not int or _val < _min:       # `type is not int` also rejects bools
+            raise ValueError(f"{_name} must be an integer >= {_min}")
     retry_nudge = (f"\n\nYour previous reply could not be parsed. Reply with EXACTLY "
                    f"one line:  SCORE: N/{threshold} - <short reason>")
     os.environ.setdefault("SQL_TOOL", cfg.get("default_sql_tool", "mock"))

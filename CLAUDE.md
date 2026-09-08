@@ -153,6 +153,7 @@ python run_local.py kpi_analytics
 python run_local.py anomaly_rca
 python run_local.py parity_hana_snowflake
 python run_evals.py <use_case>             # golden-set pass/fail
+pytest -q                                  # unit tests (tests/): memory + fill/verdict
 ```
 
 Flip to a real platform, no code change:
@@ -206,7 +207,8 @@ deps — the default `stdout` path needs nothing extra. `otel` uses `opentelemet
 (+ the OTLP exporter); it exports to `OTEL_EXPORTER_OTLP_ENDPOINT` if set, else prints
 spans to the console. Events: `run_start · generate · evaluate · refine · run_end`, each stamped with a
 per-invocation `run_id` (also returned by the Snowflake shell's `/invoke`) so loop events
-JOIN to the platform's SQL/token rows. `StdoutTracer` is the portable core — both
+JOIN to the platform's SQL/token rows. By default events carry **metrics only**; set
+`TRACE_INCLUDE_CONTENT=true` to also include answer/verdict TEXT (opt-in, for privacy). `StdoutTracer` is the portable core — both
 platforms collect stdout (SPCS → event table; Databricks serving → serving/inference
 logs). Do NOT rebuild token/cost telemetry here — read it from Cortex usage views /
 Databricks system tables and correlate by `run_id`.
@@ -224,8 +226,11 @@ All memory code lives in ONE file, `engine/memory.py` (same seam pattern as the 
 It owns the *learning-flywheel feedstock*: every finished run (episodic) and any thumbs/
 notes (feedback), as **append-only rows you own and can export** — the raw input you later
 curate by hand into `usecases/*/exemplars` + `evals` (git). The loop stays pure; capture is
-applied at the call-site boundary via `remember_run(store, final, use_case)` after
-`traced_invoke`, and the Snowflake shell adds a `POST /feedback` endpoint.
+applied at the call-site boundary via `remember_run(final, use_case)` after `traced_invoke` (it
+acquires the memoized store itself and is fail-safe), and the Snowflake shell adds a
+`POST /feedback` endpoint. Adapters validate `run_id` and close SQLite connections; an
+unknown `MEMORY_STORE` name is rejected (never silently disabled); `/feedback` reports the
+truthful status (`recorded` / `memory_disabled` / `memory_error`). Tests: `tests/`.
 
 ```bash
 MEMORY_STORE=none        # DEFAULT (opt-in). Nothing persisted.
@@ -322,9 +327,10 @@ in sync with `git status`.
 
 - Prefer plain files (`.md`, `.yaml`) over code for anything domain-specific —
   that's what keeps a pack editable by a non-engineer and diffable in git.
-- Prompt filling uses `fill()` (brace-safe string replace), not `str.format()`
-  — SQL/JSON examples in prompts contain literal braces that would break
-  `.format()`.
+- Prompt filling uses `fill()` — a **single-pass** regex replace of `{key}` (not
+  `str.format()` and not sequential `str.replace`). Single-pass so a substituted value
+  containing `{other}` is never re-interpreted; brace-safe so literal braces in SQL/JSON
+  examples and unknown `{names}` are left untouched.
 - Keep `agent.py` (the Databricks shell) free of business logic — it should
   only ever import and expose, never contain a prompt string or a rule.
 - The judge's reply is parsed into a validated `Verdict(score, reason)` via

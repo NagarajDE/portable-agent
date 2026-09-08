@@ -169,6 +169,7 @@ Real cost of a new agent: one persona paragraph + its own tuning.
 | Hardened judge (typed `Verdict` + retry) | ✅ plain-Pydantic parse/validate, `eval_retries` re-ask, safe fallback; all 4 packs green |
 | Observability (`Tracer` + structured events) | ✅ `engine/tracing.py`, `StdoutTracer` JSON events + `run_id`; otel wired; mlflow/eventtable stubbed; mock verified |
 | Memory (`MemoryStore`: episodic + feedback) | ✅ `engine/memory.py`, none/mock/sqlite verified + `/feedback` endpoint; snowflake adapter coded (untested live); threads/RAG parked |
+| Unit tests (`tests/`) | ✅ 23 tests (memory adapters + fill/verdict), all green via `pytest` |
 | `CLAUDE.md` (Claude Code project memory) | ✅ built |
 
 ### The three analytics modes we built
@@ -473,3 +474,32 @@ its feedstock. So we built exactly that and nothing more.
 **Cost we accept by owning memory**: PII/retention/right-to-be-forgotten for stored
 question/answer text is now ours — mitigated by append-only + `run_id`-keyed rows
 (deletion-by-request = a plain `DELETE ... WHERE run_id = ?`).
+
+### 12.10 Hardening adopted from the `astra-improvements` cross-review
+
+A second model reviewed `main` on a branch (`astra-improvements`, 32 tests, all passing).
+We studied it (read + ran its tests) and **cherry-picked the genuine wins into `main`,
+keeping memory simple** — we did NOT wholesale-merge its 4× memory rewrite.
+
+**Adopted:**
+- **Two real bug fixes it caught in our code:** (1) `/feedback` could report `recorded`
+  even when the write no-op'd (store had fallen back to `NullMemory`) — now returns a
+  truthful `recorded`/`memory_disabled`/`memory_error`; (2) `fill()` was a sequential
+  `str.replace` that could re-interpret a `{key}` inside an already-substituted value —
+  now single-pass regex, also more brace-safe.
+- **Robustness:** Anthropic joins text blocks + errors on empty; Databricks validates
+  `DATABRICKS_HOST` is an HTTPS origin + token present, adds timeout/retries; `sql_tool`
+  limits rows *before* `collect()`; Databricks shell parses the last user message
+  robustly (str or typed blocks) and returns `run_id` in `custom_outputs`; loop config
+  (`threshold`/`max_iters`/`eval_retries`) validated at build.
+- **Memory (kept simple):** SQLite connections closed via `closing()`; `run_id` validated;
+  unknown `MEMORY_STORE` rejected (not silently disabled); `remember_run(state, use_case)`
+  acquires the store itself.
+- **Privacy:** trace answer/verdict TEXT is opt-in via `TRACE_INCLUDE_CONTENT` (default off).
+- **Tests:** added `tests/` (our own simpler suite: memory adapters + fill/verdict).
+
+**Deliberately NOT adopted (over-engineered for a capture-only module):** schema-version
+table with hard-reject-on-existing (an upgrade footgun), timeout/deadline plumbing through
+every call, MERGE-for-idempotency on UUID keys, blanket redaction of *all* exception
+messages (hurts triage), and `status()`/counters/`purge_before`/FIFO eviction. These fight
+the simplicity we chose (decision #14) without earning their keep for append-only capture.

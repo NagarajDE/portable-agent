@@ -5,7 +5,7 @@ append-only rows YOU own and can export -- unlike vendor console thumbs/logs. Th
 the git-owned crown jewels' raw input: curate these rows into `usecases/*/exemplars`
 + `evals` (a human/offline step -- deliberately NOT automated here).
 
-Scope (deliberate -- see PROJECT_CONTEXT §12.9):
+Scope (deliberate -- see PROJECT_CONTEXT §12.9). Kept intentionally SIMPLE: capture-only.
   * WE BUILD: episodic + feedback capture behind one swappable MemoryStore, same pattern
     as LLMClient / SQLTool / Tracer. Loop (`graph.py`) stays pure; capture is applied at
     the call-site boundary via `remember_run(...)`, like `traced_invoke`.
@@ -13,22 +13,34 @@ Scope (deliberate -- see PROJECT_CONTEXT §12.9):
     + index are model/vendor-specific) and native (Cortex Search / DBX Vector Search) is
     superior. Wrap the native service behind this interface if/when needed.
   * WE PARK: conversation threads/multi-turn (needs compaction), runtime episodic recall
-    + auto-consolidation (would pollute the curated exemplars), and a Databricks/Delta
-    adapter (Snowflake is primary and its session is already wired).
+    + auto-consolidation (would pollute the curated exemplars), a Databricks/Delta adapter,
+    and heavier hardening (schema versioning, statement timeouts, MERGE-idempotency,
+    retention/purge, metrics) -- out of scope for a simple capture module.
 
 Switch with one env var (default OFF -- opt-in, safe for the mock-first deploy):
-    MEMORY_STORE=none|mock|sqlite|snowflake
+    MEMORY_STORE=none|mock|sqlite|snowflake       (an unknown name is rejected, not silent)
 
-Guarantees: episodic capture is FAIL-SAFE (a store error never breaks an answer);
-it makes no model/SQL-generation calls, so zero token/cost impact. Once you persist
-question/answer text, YOU own its PII/retention -- rows are append-only + run_id-keyed
-so deletion-by-request is a simple DELETE.
+Guarantees: episodic capture is FAIL-SAFE (`remember_run` swallows any config/init/write
+error, so a bad store never breaks an answer); it makes no model/SQL-generation calls, so
+zero token/cost impact. Once you persist question/answer text, YOU own its PII/retention --
+rows are append-only + run_id-keyed so deletion-by-request is a plain
+`DELETE ... WHERE run_id = ?`.
 """
 from __future__ import annotations
 import os
 import time
 import threading
+from contextlib import closing
 from typing import Protocol, runtime_checkable
+
+_KNOWN = ("mock", "sqlite", "snowflake")
+_DISABLED = ("none", "off", "false", "0", "")
+
+
+def _require_run_id(run_id) -> None:
+    """Reject empty/non-string run_ids so junk rows can't be written."""
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError("run_id must be a non-empty string")
 
 
 @runtime_checkable
@@ -55,18 +67,22 @@ class MockMemory:
         self.feedback: list[dict] = []
 
     def log_interaction(self, run_id, use_case, question, answer, score, iterations) -> None:
+        _require_run_id(run_id)
         self.interactions.append({"run_id": run_id, "use_case": use_case,
                                   "question": question, "answer": answer, "score": score,
                                   "iterations": iterations, "ts": time.time()})
 
     def record_feedback(self, run_id, rating, note="") -> None:
+        _require_run_id(run_id)
         self.feedback.append({"run_id": run_id, "rating": rating, "note": note,
                               "ts": time.time()})
 
 
 # --------------------------------------------------------------------------
 # SQLITE -- a local file. Durable local-dev persistence, still zero external infra.
-# A fresh connection per write keeps it safe under FastAPI's worker threads.
+# A fresh connection per write keeps it safe under FastAPI's worker threads; each is
+# CLOSED via closing() so connections don't leak (a `with connect()` block commits but
+# does NOT close the connection).
 # --------------------------------------------------------------------------
 _DDL_SQLITE = (
     """CREATE TABLE IF NOT EXISTS interactions (
@@ -82,7 +98,7 @@ class SqliteMemory:
         import sqlite3
         self._sqlite3 = sqlite3
         self._path = path or os.getenv("MEMORY_SQLITE_PATH", "portable_agent_memory.db")
-        with self._connect() as c:
+        with closing(self._connect()) as c, c:          # closing() -> close; `, c` -> commit
             for ddl in _DDL_SQLITE:
                 c.execute(ddl)
 
@@ -90,14 +106,16 @@ class SqliteMemory:
         return self._sqlite3.connect(self._path)
 
     def log_interaction(self, run_id, use_case, question, answer, score, iterations) -> None:
-        with self._connect() as c:
+        _require_run_id(run_id)
+        with closing(self._connect()) as c, c:
             c.execute("INSERT INTO interactions "
                       "(run_id, use_case, question, answer, score, iterations) "
                       "VALUES (?,?,?,?,?,?)",
                       (run_id, use_case, question, answer, score, iterations))
 
     def record_feedback(self, run_id, rating, note="") -> None:
-        with self._connect() as c:
+        _require_run_id(run_id)
+        with closing(self._connect()) as c, c:
             c.execute("INSERT INTO feedback (run_id, rating, note) VALUES (?,?,?)",
                       (run_id, rating, note))
 
@@ -126,12 +144,14 @@ class SnowflakeMemory:
             self._s.sql(ddl).collect()
 
     def log_interaction(self, run_id, use_case, question, answer, score, iterations) -> None:
+        _require_run_id(run_id)
         self._s.sql(f"INSERT INTO {_T_INTERACTIONS} "
                     "(RUN_ID, USE_CASE, QUESTION, ANSWER, SCORE, ITERATIONS) "
                     "VALUES (?,?,?,?,?,?)",
                     params=[run_id, use_case, question, answer, score, iterations]).collect()
 
     def record_feedback(self, run_id, rating, note="") -> None:
+        _require_run_id(run_id)
         self._s.sql(f"INSERT INTO {_T_FEEDBACK} (RUN_ID, RATING, NOTE) VALUES (?,?,?)",
                     params=[run_id, rating, note]).collect()
 
@@ -146,30 +166,35 @@ _lock = threading.Lock()
 
 
 def _backend() -> str:
-    return os.getenv("MEMORY_STORE", "none").strip().lower()
+    b = os.getenv("MEMORY_STORE", "none").strip().lower()
+    if b not in _DISABLED and b not in _KNOWN:          # a typo shouldn't silently disable memory
+        raise ValueError("MEMORY_STORE must be one of: none, mock, sqlite, snowflake")
+    return b
 
 
 def memory_enabled() -> bool:
-    return _backend() not in ("none", "off", "false", "0", "")
+    return _backend() not in _DISABLED
 
 
 def get_memory() -> MemoryStore:
-    """The active store (memoized). Raises if a selected backend can't init -- callers
-    that must stay up (the serving shell) should catch and fall back to NullMemory."""
+    """The active store (memoized). Raises on an unknown name or a backend that can't init --
+    callers that must stay up (the serving shell) should catch and fall back to NullMemory."""
     global _instance
     with _lock:
         if _instance is None:
             b = _backend()
-            _instance = _STORES[b]() if b in _STORES else NullMemory()
+            _instance = NullMemory() if b in _DISABLED else _STORES[b]()
         return _instance
 
 
-def remember_run(store: MemoryStore, state: dict, use_case: str) -> None:
-    """Persist one finished run as an EPISODIC row. Best-effort: a store failure is
-    swallowed so it can never break the answer that already succeeded."""
+def remember_run(state: dict, use_case: str) -> None:
+    """Persist one finished run as an EPISODIC row using the configured store. Best-effort:
+    any error (bad config, init, or write) is swallowed so it can never break the answer
+    that already succeeded."""
     try:
-        store.log_interaction(state.get("run_id", ""), use_case, state.get("task", ""),
-                              state.get("best_answer", ""), state.get("best_score"),
-                              state.get("iterations"))
+        get_memory().log_interaction(
+            state.get("run_id", ""), use_case, state.get("task", ""),
+            state.get("best_answer", ""), state.get("best_score"),
+            state.get("iterations"))
     except Exception:
         pass

@@ -14,13 +14,16 @@ Deploy (from a terminal with Snowflake CLI configured):
         --spec-path engine/platform_snowflake/spec.yaml --min-instances 1 --max-instances 1
     # then: SHOW ENDPOINTS IN SERVICE dq_agent;  -> the URL people/tools hit
 """
+import logging
 import os
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from engine.graph import build_graph, initial_state
 from engine.tracing import traced_invoke
 from engine.memory import get_memory, remember_run, memory_enabled, NullMemory
+
+logger = logging.getLogger(__name__)
 
 USE_CASE = os.environ.get("USE_CASE", "dq_qals")
 os.environ.setdefault("WORKER_PROVIDER", "cortex")   # Cortex COMPLETE
@@ -34,11 +37,19 @@ _graph = build_graph(USE_CASE, verbose=False)      # built once at startup
 try:                                               # memory is auxiliary: never let a
     _memory = get_memory()                         # misconfigured store take down serving
 except Exception:
+    logger.exception("memory init failed; serving without persistence")
     _memory = NullMemory()
 
 
 class AskRequest(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=10_000)
+
+    @field_validator("question")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("question must contain non-whitespace characters")
+        return v.strip()
 
 
 class AskResponse(BaseModel):
@@ -63,14 +74,20 @@ def healthz():
 @app.post("/invoke", response_model=AskResponse)
 def invoke(req: AskRequest) -> AskResponse:
     final = traced_invoke(_graph, initial_state(req.question), USE_CASE)
-    remember_run(_memory, final, USE_CASE)          # episodic capture (best-effort)
+    remember_run(final, USE_CASE)                   # episodic capture (best-effort)
     return AskResponse(answer=final["best_answer"], score=final["best_score"],
                        run_id=final["run_id"])
 
 
 @app.post("/feedback")
 def feedback(req: FeedbackRequest):
-    if not memory_enabled():
+    # Truthful status: don't report "recorded" if memory is off or fell back to NullMemory,
+    # and surface a write failure instead of a false success.
+    if not memory_enabled() or isinstance(_memory, NullMemory):
         return {"status": "memory_disabled", "run_id": req.run_id}
-    _memory.record_feedback(req.run_id, req.rating, req.note or "")
+    try:
+        _memory.record_feedback(req.run_id, req.rating, req.note or "")
+    except Exception:
+        logger.exception("feedback persistence failed", extra={"run_id": req.run_id})
+        return {"status": "memory_error", "run_id": req.run_id}
     return {"status": "recorded", "run_id": req.run_id}

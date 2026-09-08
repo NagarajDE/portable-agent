@@ -48,7 +48,10 @@ class CortexAnalystTool:
         if not sql:                                                  # ambiguous Q -> return the text
             texts = [c.get("text", "") for c in content if c.get("type") == "text"]
             return "\n".join(t for t in texts if t) or "Cortex Analyst returned no SQL."
-        return _rows_to_text(self._s.sql(sql).collect())
+        max_rows = 50                                                # cap BEFORE collect() to bound memory
+        rows = self._s.sql(sql).limit(max_rows + 1).collect()
+        text = _rows_to_text(rows[:max_rows])
+        return text + ("\n... (additional rows omitted)" if len(rows) > max_rows else "")
 
 
 # Databricks Genie -- text-to-SQL over Unity Catalog (managed MCP tool once deployed).
