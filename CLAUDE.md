@@ -254,8 +254,9 @@ deletion-by-request is a plain `DELETE`.
   (Analyst REST → runs the generated SQL) in `engine/llm_client.py` / `engine/sql_tool.py`.
   Auth is shared via `snowpark_session()` + `snowflake_bearer_headers()`: inside SPCS they
   use the injected OAuth token at `/snowflake/session/token`; locally they fall back to
-  `SNOWFLAKE_*` creds (session) and `SNOWFLAKE_PAT` (Analyst REST). Needs
-  `CORTEX_SEMANTIC_MODEL` + a warehouse. Verified: imports stay lazy (mock path untouched),
+  `SNOWFLAKE_*` creds (session) and `SNOWFLAKE_PAT` (Analyst REST). Needs a warehouse and a
+  semantic layer — EITHER `CORTEX_SEMANTIC_VIEW` (an existing native Semantic View) OR
+  `CORTEX_SEMANTIC_MODEL` (a stage YAML); view wins if both set. Verified: imports stay lazy (mock path untouched),
   row formatter + auth-error paths unit-tested; the live call is untested here (no account).
 - **Databricks/Genie are STILL STUBBED**: `DatabricksClient` / `GenieTool` have the SDK
   shape + a `TODO`. Wire like Cortex, and test with `SQL_TOOL=mock` first to isolate the

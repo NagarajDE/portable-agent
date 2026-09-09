@@ -60,14 +60,25 @@ class CortexAnalystTool:
     def __init__(self):
         from engine.llm_client import snowpark_session
         self._s = snowpark_session()                                 # runs the generated SQL
-        self._semantic_model = os.environ["CORTEX_SEMANTIC_MODEL"]   # @db.schema.stage/model.yaml
+        # Cortex Analyst accepts EITHER a native Semantic View (an object already in the account)
+        # OR a semantic model YAML uploaded to a stage. Prefer an existing view if set; exactly
+        # one is required. This is the only place the two forms differ -- the REST body key changes.
+        view = (os.getenv("CORTEX_SEMANTIC_VIEW") or "").strip()     # DB.SCHEMA.MY_SEMANTIC_VIEW
+        model = (os.getenv("CORTEX_SEMANTIC_MODEL") or "").strip()   # @db.schema.stage/model.yaml
+        if view:
+            self._semantic = {"semantic_view": view}
+        elif model:
+            self._semantic = {"semantic_model_file": model}
+        else:
+            raise KeyError("SQL_TOOL=cortex needs a semantic layer: set CORTEX_SEMANTIC_VIEW "
+                           "(a native Semantic View) or CORTEX_SEMANTIC_MODEL (a stage YAML).")
 
     def ask(self, question: str) -> str:
         import requests
         from engine.llm_client import snowflake_rest_base, snowflake_bearer_headers
         body = {"messages": [{"role": "user",
                               "content": [{"type": "text", "text": question}]}],
-                "semantic_model_file": self._semantic_model}
+                **self._semantic}
         resp = requests.post(f"{snowflake_rest_base()}/api/v2/cortex/analyst/message",
                              headers=snowflake_bearer_headers(), json=body, timeout=60)
         resp.raise_for_status()

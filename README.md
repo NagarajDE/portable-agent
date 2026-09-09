@@ -9,6 +9,9 @@ Host on Databricks with one shell file.
 >
 > How the agent improves without retraining (evals vs. exemplars, the learning flywheel):
 > [`docs/concepts/evals-and-the-learning-flywheel.md`](docs/concepts/evals-and-the-learning-flywheel.md).
+>
+> Run locally on Windows against real Snowflake Cortex (or Databricks):
+> [`docs/run-locally-windows.md`](docs/run-locally-windows.md).
 
 ## Layout
 

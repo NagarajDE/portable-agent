@@ -1,7 +1,8 @@
 """Tests for the read-only backstop on model-generated SQL (defense-in-depth)."""
 import pytest
 
-from engine.sql_tool import _ensure_read_only
+import engine.llm_client as _llm
+from engine.sql_tool import _ensure_read_only, CortexAnalystTool
 
 
 def test_allows_select():
@@ -49,3 +50,29 @@ def test_allows_dollar_quoted_semicolon():
 
 def test_allows_inline_line_comment_with_semicolon():
     assert _ensure_read_only("SELECT 1 -- ; not a statement\n")
+
+
+# --- CortexAnalystTool: semantic layer selection (view OR stage YAML) -------
+@pytest.fixture
+def _no_snowpark(monkeypatch):
+    """Stub the Snowpark session so __init__ doesn't need live creds."""
+    monkeypatch.setattr(_llm, "snowpark_session", lambda: object())
+
+
+def test_cortex_prefers_semantic_view(monkeypatch, _no_snowpark):
+    monkeypatch.setenv("CORTEX_SEMANTIC_VIEW", "DB.SCHEMA.MY_VIEW")
+    monkeypatch.setenv("CORTEX_SEMANTIC_MODEL", "@DB.SCHEMA.STAGE/m.yaml")  # both set -> view wins
+    assert CortexAnalystTool()._semantic == {"semantic_view": "DB.SCHEMA.MY_VIEW"}
+
+
+def test_cortex_falls_back_to_stage_yaml(monkeypatch, _no_snowpark):
+    monkeypatch.delenv("CORTEX_SEMANTIC_VIEW", raising=False)
+    monkeypatch.setenv("CORTEX_SEMANTIC_MODEL", "@DB.SCHEMA.STAGE/m.yaml")
+    assert CortexAnalystTool()._semantic == {"semantic_model_file": "@DB.SCHEMA.STAGE/m.yaml"}
+
+
+def test_cortex_requires_a_semantic_layer(monkeypatch, _no_snowpark):
+    monkeypatch.delenv("CORTEX_SEMANTIC_VIEW", raising=False)
+    monkeypatch.delenv("CORTEX_SEMANTIC_MODEL", raising=False)
+    with pytest.raises(KeyError):
+        CortexAnalystTool()

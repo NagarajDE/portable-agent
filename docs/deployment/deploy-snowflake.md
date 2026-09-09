@@ -248,9 +248,11 @@ pointing at your Snowflake account. Same code as in the container — only the a
 ### A1. What you need from Snowflake
 - Account with **Cortex enabled** and a role granted the `SNOWFLAKE.CORTEX_USER` database role.
 - A **warehouse** you can use, and **SELECT** on the tables your questions touch.
-- For the **Cortex Analyst** step only: a **semantic model YAML** uploaded to a stage, and a
-  **Programmatic Access Token (PAT)** for the REST call. (Generate a PAT in Snowsight:
+- For the **Cortex Analyst** step only: a **semantic layer** — an existing **Semantic View**
+  (`CORTEX_SEMANTIC_VIEW`) *or* a **semantic model YAML** on a stage (`CORTEX_SEMANTIC_MODEL`) —
+  and a **Programmatic Access Token (PAT)** for the REST call. (Generate a PAT in Snowsight:
   *your user → Settings → Authentication → Programmatic access tokens*, scoped to your role.)
+  Windows-first walkthrough incl. the Semantic View path: [`../run-locally-windows.md`](../run-locally-windows.md).
 
 ### A2. Put your credentials in a `.env` file (this is "where the creds go")
 From the **repo root**:
