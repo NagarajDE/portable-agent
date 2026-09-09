@@ -172,26 +172,30 @@ class _RaisingJudge:
 
 def test_b2_empty_judge_reply_retries_then_falls_back(monkeypatch):
     from engine.llm_client import EmptyResponseError
+    # max_iters=0 -> evaluate runs EXACTLY once, so judge.i counts within-evaluation attempts only
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
-        "max_score": 18, "pass_score": 18, "max_iters": 1, "eval_retries": 1,
+        "max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 1,
         "default_sql_tool": "mock"})
     judge = _RaisingJudge(EmptyResponseError("blank"))    # always empty
-    g = build_graph("dq_qals", llm=_Seq("A0", "A1"), eval_llm=judge, verbose=False)
+    g = build_graph("dq_qals", llm=_Seq("A0"), eval_llm=judge, verbose=False)
     f = g.invoke(initial_state("q"))                       # must NOT abort the run
     assert f["best_score"] == 0                            # fell back, didn't crash
-    assert judge.i >= 2                                    # >=2 complete() calls -> retry ran (evaluate runs per graph iter)
+    assert f["iterations"] == 0                            # no refinement happened
+    assert judge.i == 2                                    # exactly 2 attempts in ONE evaluate -> retry used
 
 
 def test_b2_evaluator_recovers_after_empty_then_valid(monkeypatch):
     from engine.llm_client import EmptyResponseError
+    # max_iters=0 -> a single evaluate; reaching 18 proves the 2nd attempt (retry) both ran and was used
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
-        "max_score": 18, "pass_score": 18, "max_iters": 1, "eval_retries": 1,
+        "max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 1,
         "default_sql_tool": "mock"})
     judge = _RaisingJudge(EmptyResponseError("blank"), "SCORE: 18/18 - ok")  # empty, then valid
     g = build_graph("dq_qals", llm=_Seq("A0"), eval_llm=judge, verbose=False)
     f = g.invoke(initial_state("q"))
     assert f["best_score"] == 18                           # retry recovered
-    assert judge.i == 2                                    # proves the 2nd (valid) attempt was used
+    assert f["iterations"] == 0                            # within a single evaluation, no refine
+    assert judge.i == 2                                    # exactly 2 attempts -> the retry was used
 
 
 def test_nb2_config_error_propagates_not_silently_zero(monkeypatch):

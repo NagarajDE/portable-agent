@@ -29,11 +29,14 @@ def _rows_to_text(rows, max_rows: int = 100) -> str:
 
 
 def _blank_strings_and_comments(sql: str) -> str:
-    """Return sql with string literals and comments removed, in ONE left-to-right pass that
-    tracks lexical state (bare / '…' / $$…$$ / --line / /*block*/). A single scanner -- unlike
-    sequential regex passes -- can't be fooled by a comment marker inside a string or a quote
-    inside a comment (NB1): e.g. `SELECT '-- '; DROP TABLE t` no longer has its ';' hidden by an
-    over-eager comment strip. Used only to test for a real statement separator."""
+    """Return sql with string literals, quoted identifiers, and comments removed, in ONE
+    left-to-right pass that tracks lexical state. A single scanner -- unlike sequential regex
+    passes -- can't be fooled by a marker of one form appearing inside another (NB1). Covers
+    Snowflake's forms: `--` line, `/* */` block, `$$…$$` dollar string, `'…'` string (with both
+    `''` and backslash `\\'` escapes), and `"…"` delimited identifier (with `""` escapes). This
+    is only used to detect a real ';' statement separator; per the docstring on _ensure_read_only
+    the SELECT-only role grant -- not this heuristic -- is the actual security boundary, so exotic
+    forms it doesn't model (e.g. nested block comments) are an accepted limitation, not a hole."""
     out, i, n = [], 0, len(sql)
     while i < n:
         two = sql[i:i + 2]
@@ -46,15 +49,20 @@ def _blank_strings_and_comments(sql: str) -> str:
         elif two == "$$":                                # dollar-quoted string -> to next $$
             j = sql.find("$$", i + 2)
             i = n if j == -1 else j + 2
-        elif sql[i] == "'":                              # single-quoted string ('' escapes a quote)
+        elif sql[i] in ("'", '"'):                       # '…' string OR "…" delimited identifier
+            q = sql[i]
             i += 1
             while i < n:
-                if sql[i] == "'":
-                    if sql[i + 1:i + 2] == "'":
-                        i += 2                            # doubled quote -> stay in string
+                c = sql[i]
+                if c == "\\" and q == "'":               # backslash escape (single-quote strings only)
+                    i += 2
+                    continue
+                if c == q:
+                    if sql[i + 1:i + 2] == q:            # doubled quote -> escaped, stay inside
+                        i += 2
                         continue
                     i += 1
-                    break
+                    break                                # closing quote
                 i += 1
         else:
             out.append(sql[i])

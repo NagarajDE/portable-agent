@@ -58,10 +58,22 @@ def test_allows_inline_line_comment_with_semicolon():
     "SELECT '-- '; DROP TABLE t",                       # '--' inside the string once ate the ';'
     "SELECT $$'$$; DROP TABLE t; SELECT $$'$$",         # dollar-quote vs single-quote interaction
     "SELECT '/*'; DROP TABLE t",                        # block-comment marker inside a string
+    r"SELECT '\''; DROP TABLE t",                       # backslash-escaped quote (Snowflake \')
+    'SELECT 1 AS "\'"; DROP TABLE t',                   # apostrophe inside a "quoted identifier"
 ])
 def test_rejects_hidden_second_statement(bad):
     with pytest.raises(ValueError):
         _ensure_read_only(bad)
+
+
+# ...and the corresponding legitimate single statements must still be ACCEPTED (no false positive)
+@pytest.mark.parametrize("ok", [
+    r"SELECT '\'' AS q",                                # a string that is just an escaped quote
+    'SELECT 1 AS "a;b"',                                # ';' inside a delimited identifier is not a separator
+    'SELECT 1 AS "a""b"',                               # doubled "" inside a delimited identifier
+])
+def test_allows_legit_escaped_and_quoted_identifiers(ok):
+    assert _ensure_read_only(ok)
 
 
 # --- CortexAnalystTool: semantic layer selection (view OR stage YAML) -------
