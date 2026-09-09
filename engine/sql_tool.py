@@ -28,6 +28,40 @@ def _rows_to_text(rows, max_rows: int = 100) -> str:
     return "\n".join(lines)
 
 
+def _blank_strings_and_comments(sql: str) -> str:
+    """Return sql with string literals and comments removed, in ONE left-to-right pass that
+    tracks lexical state (bare / '…' / $$…$$ / --line / /*block*/). A single scanner -- unlike
+    sequential regex passes -- can't be fooled by a comment marker inside a string or a quote
+    inside a comment (NB1): e.g. `SELECT '-- '; DROP TABLE t` no longer has its ';' hidden by an
+    over-eager comment strip. Used only to test for a real statement separator."""
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        two = sql[i:i + 2]
+        if two == "--":                                  # line comment -> to EOL
+            j = sql.find("\n", i)
+            i = n if j == -1 else j
+        elif two == "/*":                                # block comment -> to */
+            j = sql.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+        elif two == "$$":                                # dollar-quoted string -> to next $$
+            j = sql.find("$$", i + 2)
+            i = n if j == -1 else j + 2
+        elif sql[i] == "'":                              # single-quoted string ('' escapes a quote)
+            i += 1
+            while i < n:
+                if sql[i] == "'":
+                    if sql[i + 1:i + 2] == "'":
+                        i += 2                            # doubled quote -> stay in string
+                        continue
+                    i += 1
+                    break
+                i += 1
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out)
+
+
 def _ensure_read_only(sql: str) -> str:
     """Defense-in-depth HEURISTIC, not a security boundary: reject obvious writes and
     multi-statement SQL from the model. The REAL control is granting the service role
@@ -44,13 +78,9 @@ def _ensure_read_only(sql: str) -> str:
     stripped = stripped.rstrip(";").strip()
     if not re.match(r"(?is)^(select|with)\b", stripped):
         raise ValueError("refusing non-SELECT SQL from the model (read-only heuristic)")
-    # For the multi-statement check only, blank out comments and string literals so a ';'
-    # inside them isn't a false positive (single-quoted, $$dollar-quoted$$, --line, /*block*/).
-    check = re.sub(r"--[^\n]*", "", stripped)
-    check = re.sub(r"/\*.*?\*/", "", check, flags=re.DOTALL)
-    check = re.sub(r"'(?:[^']|'')*'", "", check)
-    check = re.sub(r"\$\$.*?\$\$", "", check, flags=re.DOTALL)
-    if ";" in check:
+    # Multi-statement check: blank strings/comments in one pass so a ';' inside them isn't a
+    # false positive, and (NB1) a ';' outside them can't be hidden by a naive comment strip.
+    if ";" in _blank_strings_and_comments(stripped):
         raise ValueError("refusing multi-statement SQL from the model")
     return stripped
 
@@ -58,11 +88,11 @@ def _ensure_read_only(sql: str) -> str:
 # Snowflake Cortex Analyst -- text-to-SQL over a semantic model (REST), SQL run via Snowpark.
 class CortexAnalystTool:
     def __init__(self):
-        from engine.llm_client import snowpark_session
-        self._s = snowpark_session()                                 # runs the generated SQL
-        # Cortex Analyst accepts EITHER a native Semantic View (an object already in the account)
-        # OR a semantic model YAML uploaded to a stage. Prefer an existing view if set; exactly
-        # one is required. This is the only place the two forms differ -- the REST body key changes.
+        # Resolve the semantic layer FIRST, so a missing/misconfigured layer fails with a clear
+        # message BEFORE we open a Snowpark session (which needs creds + network and would
+        # otherwise mask this error). Cortex Analyst accepts EITHER a native Semantic View (an
+        # object already in the account) OR a semantic model YAML on a stage; prefer an existing
+        # view if set; exactly one is required. This is the only place the two forms differ.
         view = (os.getenv("CORTEX_SEMANTIC_VIEW") or "").strip()     # DB.SCHEMA.MY_SEMANTIC_VIEW
         model = (os.getenv("CORTEX_SEMANTIC_MODEL") or "").strip()   # @db.schema.stage/model.yaml
         if view:
@@ -72,6 +102,8 @@ class CortexAnalystTool:
         else:
             raise KeyError("SQL_TOOL=cortex needs a semantic layer: set CORTEX_SEMANTIC_VIEW "
                            "(a native Semantic View) or CORTEX_SEMANTIC_MODEL (a stage YAML).")
+        from engine.llm_client import snowpark_session
+        self._s = snowpark_session()                                 # runs the generated SQL
 
     def ask(self, question: str) -> str:
         import requests

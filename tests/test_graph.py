@@ -149,6 +149,14 @@ def test_b1_json_bad_score_does_not_fall_through_to_embedded_score():
         parse_verdict('{"score": true, "reason": "SCORE: 18/18 - accepted"}', 18)
 
 
+def test_b1_edge_trailing_second_object_still_authoritative():
+    # B1 edge: a trailing 2nd JSON object once broke greedy `{.*}` extraction, re-enabling the
+    # line-form fallback which then read the embedded "SCORE: 18/18". Balanced-scan takes the
+    # FIRST object (bad bool score) -> must raise, not smuggle 18.
+    with pytest.raises((ValueError, ValidationError)):
+        parse_verdict('{"score": true, "reason": "SCORE: 18/18 - accepted"}\n{}', 18)
+
+
 class _RaisingJudge:
     """Scripted judge; a scripted Exception value is raised instead of returned."""
     def __init__(self, *replies):
@@ -171,6 +179,7 @@ def test_b2_empty_judge_reply_retries_then_falls_back(monkeypatch):
     g = build_graph("dq_qals", llm=_Seq("A0", "A1"), eval_llm=judge, verbose=False)
     f = g.invoke(initial_state("q"))                       # must NOT abort the run
     assert f["best_score"] == 0                            # fell back, didn't crash
+    assert judge.i >= 2                                    # >=2 complete() calls -> retry ran (evaluate runs per graph iter)
 
 
 def test_b2_evaluator_recovers_after_empty_then_valid(monkeypatch):
@@ -182,3 +191,16 @@ def test_b2_evaluator_recovers_after_empty_then_valid(monkeypatch):
     g = build_graph("dq_qals", llm=_Seq("A0"), eval_llm=judge, verbose=False)
     f = g.invoke(initial_state("q"))
     assert f["best_score"] == 18                           # retry recovered
+    assert judge.i == 2                                    # proves the 2nd (valid) attempt was used
+
+
+def test_nb2_config_error_propagates_not_silently_zero(monkeypatch):
+    # NB2: a ValueError from complete() (e.g. LLM_MAX_TOKENS=abc) is a CONFIG bug, not an
+    # unusable verdict -- it must propagate, NOT be retried into a fallback score of 0.
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
+        "max_score": 18, "pass_score": 18, "max_iters": 1, "eval_retries": 1,
+        "default_sql_tool": "mock"})
+    judge = _RaisingJudge(ValueError("invalid literal for int(): 'abc'"))  # config error, not empty
+    g = build_graph("dq_qals", llm=_Seq("A0"), eval_llm=judge, verbose=False)
+    with pytest.raises(ValueError):
+        g.invoke(initial_state("q"))

@@ -52,6 +52,18 @@ def test_allows_inline_line_comment_with_semicolon():
     assert _ensure_read_only("SELECT 1 -- ; not a statement\n")
 
 
+# NB1: a real 2nd statement must NOT be hidden by a comment marker INSIDE a string literal,
+# nor by string/comment markers interacting across sequential passes.
+@pytest.mark.parametrize("bad", [
+    "SELECT '-- '; DROP TABLE t",                       # '--' inside the string once ate the ';'
+    "SELECT $$'$$; DROP TABLE t; SELECT $$'$$",         # dollar-quote vs single-quote interaction
+    "SELECT '/*'; DROP TABLE t",                        # block-comment marker inside a string
+])
+def test_rejects_hidden_second_statement(bad):
+    with pytest.raises(ValueError):
+        _ensure_read_only(bad)
+
+
 # --- CortexAnalystTool: semantic layer selection (view OR stage YAML) -------
 @pytest.fixture
 def _no_snowpark(monkeypatch):
@@ -71,7 +83,12 @@ def test_cortex_falls_back_to_stage_yaml(monkeypatch, _no_snowpark):
     assert CortexAnalystTool()._semantic == {"semantic_model_file": "@DB.SCHEMA.STAGE/m.yaml"}
 
 
-def test_cortex_requires_a_semantic_layer(monkeypatch, _no_snowpark):
+def test_cortex_requires_a_semantic_layer_before_session(monkeypatch):
+    # NO snowpark stub on purpose: the semantic-layer check must fail FIRST, so a missing
+    # config raises the clear KeyError even if a session could never be opened (ordering).
+    def _boom():
+        raise RuntimeError("session should not be attempted before the semantic-layer check")
+    monkeypatch.setattr(_llm, "snowpark_session", _boom)
     monkeypatch.delenv("CORTEX_SEMANTIC_VIEW", raising=False)
     monkeypatch.delenv("CORTEX_SEMANTIC_MODEL", raising=False)
     with pytest.raises(KeyError):

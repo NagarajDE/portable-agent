@@ -112,6 +112,31 @@ def _coerce_score(value) -> int:
     return round(f)
 
 
+def _first_json_object(text: str) -> str | None:
+    """Return the FIRST balanced {...} object in text (tracking JSON strings + escapes), or None.
+    A balanced scan beats a greedy `\\{.*\\}` regex, which spans from the first '{' to the LAST
+    '}' across multiple objects and then fails to parse -- which would silently re-enable the
+    line-form fallback and let an embedded 'SCORE: 18/18' smuggle a passing score (B1 edge)."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:            esc = False
+            elif c == "\\":    esc = True
+            elif c == '"':     in_str = False
+            continue
+        if c == '"':           in_str = True
+        elif c == "{":         depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None                                        # unbalanced -> no complete object
+
+
 def parse_verdict(raw: str, max_score: int) -> Verdict:
     """Turn a judge reply into a validated Verdict. Accepts either a JSON object
     {"score": N, "reason": "..."} OR the house line form  SCORE: N/<max> - <reason>.
@@ -121,11 +146,11 @@ def parse_verdict(raw: str, max_score: int) -> Verdict:
     Raises ValueError / ValidationError on anything unparseable or out of range (caller retries)."""
     text = (raw or "").strip()
 
-    obj = None                                         # 1) JSON object anywhere
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    if m:
+    obj = None                                         # 1) first balanced JSON object anywhere
+    blob = _first_json_object(text)
+    if blob:
         try:
-            obj = json.loads(m.group(0))
+            obj = json.loads(blob)
         except (ValueError, TypeError):
             obj = None
 
@@ -214,14 +239,19 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
                     max_score=max_score)               # rubric's denominator matches the configured scale
         verdict: Verdict | None = None
         for attempt in range(eval_retries + 1):
+            prompt = base if attempt == 0 else base + retry_nudge
             try:
-                # complete() is INSIDE the try so an empty/whitespace judge reply
-                # (EmptyResponseError) is retried and then falls back, instead of aborting
-                # the run (B2). Auth/config errors are other types and still propagate.
-                raw = eval_llm.complete(base if attempt == 0 else base + retry_nudge)
+                raw = eval_llm.complete(prompt)
+            except EmptyResponseError as e:
+                # ONLY a blank/whitespace judge reply is retried then falls back (B2). Any OTHER
+                # error from complete() (bad config e.g. LLM_MAX_TOKENS=abc, auth, truncation) is
+                # NOT a verdict problem -- let it propagate and fail loud, don't mask it as 0 (NB2).
+                log(f"  [evaluate] empty judge reply (attempt {attempt + 1}/{eval_retries + 1}): {e}")
+                continue
+            try:
                 verdict = parse_verdict(raw, max_score)
                 break
-            except (ValueError, ValidationError, EmptyResponseError) as e:
+            except (ValueError, ValidationError) as e:  # malformed verdict -> retry, then fall back
                 log(f"  [evaluate] unusable verdict "
                     f"(attempt {attempt + 1}/{eval_retries + 1}): {e}")
         if verdict is None:                            # retries exhausted -> safe worst case
