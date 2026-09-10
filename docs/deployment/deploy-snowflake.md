@@ -248,10 +248,12 @@ pointing at your Snowflake account. Same code as in the container — only the a
 ### A1. What you need from Snowflake
 - Account with **Cortex enabled** and a role granted the `SNOWFLAKE.CORTEX_USER` database role.
 - A **warehouse** you can use, and **SELECT** on the tables your questions touch.
+- A **Programmatic Access Token (PAT)** — the **single** credential locally: it authenticates
+  both the Snowpark session (as the password) and the Cortex Analyst REST call (as a bearer).
+  No `SNOWFLAKE_PASSWORD`. (Generate one in Snowsight: *your user → Settings → Authentication →
+  Programmatic access tokens*, scoped to the role above.)
 - For the **Cortex Analyst** step only: a **semantic layer** — an existing **Semantic View**
-  (`CORTEX_SEMANTIC_VIEW`) *or* a **semantic model YAML** on a stage (`CORTEX_SEMANTIC_MODEL`) —
-  and a **Programmatic Access Token (PAT)** for the REST call. (Generate a PAT in Snowsight:
-  *your user → Settings → Authentication → Programmatic access tokens*, scoped to your role.)
+  (`CORTEX_SEMANTIC_VIEW`) *or* a **semantic model YAML** on a stage (`CORTEX_SEMANTIC_MODEL`).
   Windows-first walkthrough incl. the Semantic View path: [`../run-locally-windows.md`](../run-locally-windows.md).
 
 ### A2. Put your credentials in a `.env` file (this is "where the creds go")
@@ -265,18 +267,19 @@ Open `.env` and set (leave the rest as-is). **This file is git-ignored — it is
 WORKER_PROVIDER=cortex
 SQL_TOOL=cortex
 
+# ONE secret -- a PAT -- authenticates BOTH the session and the Analyst REST call. No password.
 SNOWFLAKE_ACCOUNT=ab12345.us-east-1          # your account identifier
 SNOWFLAKE_USER=YOUR_USER
-SNOWFLAKE_PASSWORD=YOUR_PASSWORD
-SNOWFLAKE_ROLE=YOUR_ROLE                      # must have SNOWFLAKE.CORTEX_USER
+SNOWFLAKE_PAT=<your programmatic access token>   # used as password AND REST bearer
+SNOWFLAKE_HOST=ab12345.us-east-1.snowflakecomputing.com   # account host for the REST call
+SNOWFLAKE_ROLE=YOUR_ROLE                      # must have SNOWFLAKE.CORTEX_USER; scope the PAT to it
 SNOWFLAKE_WAREHOUSE=YOUR_WH                   # runs COMPLETE + the Analyst-generated SQL
 SNOWFLAKE_DATABASE=YOUR_DB
 SNOWFLAKE_SCHEMA=YOUR_SCHEMA
 
-# Cortex Analyst (SQL_TOOL=cortex) also needs:
-SNOWFLAKE_HOST=ab12345.us-east-1.snowflakecomputing.com   # account host for the REST call
-SNOWFLAKE_PAT=<your programmatic access token>
-CORTEX_SEMANTIC_MODEL=@YOUR_DB.YOUR_SCHEMA.YOUR_STAGE/model.yaml
+# Cortex Analyst (SQL_TOOL=cortex) also needs a semantic layer -- an existing view OR a stage YAML:
+CORTEX_SEMANTIC_VIEW=YOUR_DB.YOUR_SCHEMA.YOUR_SEMANTIC_VIEW
+# CORTEX_SEMANTIC_MODEL=@YOUR_DB.YOUR_SCHEMA.YOUR_STAGE/model.yaml
 
 # optional:
 # CORTEX_MODEL=claude-3-5-sonnet
@@ -284,8 +287,8 @@ CORTEX_SEMANTIC_MODEL=@YOUR_DB.YOUR_SCHEMA.YOUR_STAGE/model.yaml
 
 ### A3. Run it — in two steps, so problems are easy to pin down
 
-**Step 1 — test Cortex COMPLETE only** (the LLM half; needs no PAT or semantic model). In
-`.env` temporarily set `SQL_TOOL=mock`, then:
+**Step 1 — test Cortex COMPLETE only** (the LLM half; needs the PAT for the session, but no
+semantic model). In `.env` temporarily set `SQL_TOOL=mock`, then:
 ```bash
 python run_local.py dq_qals
 ```
@@ -301,12 +304,13 @@ warehouse, and answers from the real rows.
 ### A4. What you should see / what breaks
 - **Works:** normal loop output ending in `BEST SCORE : n/18` with a real answer.
 - **`No Snowflake token...`** → you set `SQL_TOOL=cortex` but no `SNOWFLAKE_PAT` (+`SNOWFLAKE_HOST`). Add them, or use `SQL_TOOL=mock` for Step 1.
-- **`KeyError: 'SNOWFLAKE_PASSWORD'`** (or account/user/…) → a required `SNOWFLAKE_*` value is missing from `.env`.
-- **`... CORTEX_SEMANTIC_MODEL`** → set the stage path in `.env`.
+- **`KeyError: 'SNOWFLAKE_PAT'`** (or account/user) → a required value is missing from `.env` (`SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PAT`).
+- **session auth error** → the PAT is wrong/expired or not scoped to `SNOWFLAKE_ROLE`; regenerate it.
+- **`needs a semantic layer...`** → set `CORTEX_SEMANTIC_VIEW` or `CORTEX_SEMANTIC_MODEL` in `.env`.
 - **HTTP 401/403 on the Analyst call** → PAT invalid/expired or the role lacks Cortex; regenerate the PAT and confirm `SNOWFLAKE.CORTEX_USER`.
 - **SQL run error** → the role can't see the tables in the semantic model; grant SELECT.
 
-> Prefer not to use a password locally? You can still validate everything with the built-in
+> Prefer not to use any real credential locally? You can still validate everything with the built-in
 > mock (`WORKER_PROVIDER=mock SQL_TOOL=mock`) — but that doesn't touch Snowflake. Appendix A
 > is specifically for confirming the **real** Cortex calls before you containerize.
 

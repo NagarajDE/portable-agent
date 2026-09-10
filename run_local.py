@@ -1,17 +1,19 @@
 """
-Run any use case locally on the MOCK provider -- no credentials.
+Run any use case locally. Provider/model/SQL tool come from the env / .env.
 
-    python run_local.py                     # default use case (dq_qals)
-    python run_local.py parity_hana_snowflake
-    USE_CASE=dq_qals python run_local.py
+    python run_local.py                          # default use case (dq_qals), its sample_task
+    python run_local.py inventory_balance        # a pack, its sample_task
+    python run_local.py inventory_balance "Top 5 materials by on-hand quantity?"   # your own question
+    USE_CASE=dq_qals  QUESTION="..."  python run_local.py                          # via env vars
 
-Flip to a real platform by exporting env first, e.g.:
-    WORKER_PROVIDER=databricks SQL_TOOL=genie python run_local.py
+Question precedence: CLI args after the use-case  >  $QUESTION  >  the pack's sample_task.
+Flip to a real platform via env / .env, e.g.:  WORKER_PROVIDER=cortex SQL_TOOL=cortex
 """
 import sys, os
 try:                                   # optional: load a local .env if python-dotenv is installed
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)          # .env is the local source of truth -> it wins over any
+                                        # stale SNOWFLAKE_*/WORKER_* already exported in the shell
 except ImportError:
     pass
 from engine.graph import build_graph, initial_state, load_config
@@ -19,10 +21,11 @@ from engine.tracing import traced_invoke
 from engine.memory import remember_run
 
 def main():
-    use_case = (sys.argv[1] if len(sys.argv) > 1
-                else os.getenv("USE_CASE", "dq_qals"))
+    args = sys.argv[1:]
+    use_case = args[0] if args else os.getenv("USE_CASE", "dq_qals")
     cfg = load_config(use_case)
-    task = cfg["sample_task"]
+    # question: everything after the use-case on the CLI > $QUESTION > the pack's sample_task
+    task = " ".join(args[1:]).strip() or os.getenv("QUESTION") or cfg["sample_task"]
     print(f"\nUSE CASE: {cfg['name']}  [{use_case}]")
     print(f"TASK    : {task}\n" + "-" * 68)
     app = build_graph(use_case)

@@ -86,6 +86,9 @@ Cortex Analyst turns the question into SQL using a semantic layer. The adapter
 
 Open `.env` and set (leave everything else as-is):
 
+**One secret does it all:** a single `SNOWFLAKE_PAT` authenticates *both* the Snowpark session
+(COMPLETE + running the SQL) and the Cortex Analyst REST call — there is **no** `SNOWFLAKE_PASSWORD`.
+
 ```dotenv
 WORKER_PROVIDER=cortex
 EVAL_PROVIDER=auto            # judge = same provider as worker; or set anthropic to cross-check
@@ -93,15 +96,12 @@ SQL_TOOL=cortex
 
 SNOWFLAKE_ACCOUNT=ab12345.us-east-1          # your account identifier
 SNOWFLAKE_USER=YOUR_USER
-SNOWFLAKE_PASSWORD=YOUR_PASSWORD
-SNOWFLAKE_ROLE=YOUR_ROLE                      # must have SNOWFLAKE.CORTEX_USER
+SNOWFLAKE_PAT=<your programmatic access token>   # the ONLY secret — used as password AND REST bearer
+SNOWFLAKE_HOST=ab12345.us-east-1.snowflakecomputing.com   # for the Analyst REST call
+SNOWFLAKE_ROLE=YOUR_ROLE                      # must have SNOWFLAKE.CORTEX_USER; PAT should be scoped to it
 SNOWFLAKE_WAREHOUSE=YOUR_WH                   # runs COMPLETE + the Analyst-generated SQL
 SNOWFLAKE_DATABASE=YOUR_DB
 SNOWFLAKE_SCHEMA=YOUR_SCHEMA
-
-# Cortex Analyst REST call:
-SNOWFLAKE_HOST=ab12345.us-east-1.snowflakecomputing.com
-SNOWFLAKE_PAT=<your programmatic access token>
 
 # Semantic layer -- pick ONE (see §2):
 CORTEX_SEMANTIC_VIEW=MY_DB.MY_SCHEMA.MY_VIEW
@@ -110,6 +110,10 @@ CORTEX_SEMANTIC_VIEW=MY_DB.MY_SCHEMA.MY_VIEW
 # optional:
 # CORTEX_MODEL=claude-3-5-sonnet             # the Cortex COMPLETE model the worker/judge use
 ```
+
+> The PAT is passed in place of a password — Snowflake accepts a Programmatic Access Token
+> anywhere a password is accepted. Scope the PAT to `SNOWFLAKE_ROLE`, and make sure that role
+> holds `SNOWFLAKE.CORTEX_USER` + SELECT on your tables.
 
 ### Step 1 — test Cortex COMPLETE only (the LLM half)
 
@@ -144,15 +148,17 @@ py -3 run_evals.py dq_qals      # runs the pack's golden questions through the f
 | Symptom | Cause → fix |
 |---|---|
 | `No Snowflake token…` | `SQL_TOOL=cortex` but no `SNOWFLAKE_PAT` (+`SNOWFLAKE_HOST`). Add them. |
-| `KeyError: 'SNOWFLAKE_PASSWORD'` (or account/user/…) | a required `SNOWFLAKE_*` value is missing from `.env`. |
+| `KeyError: 'SNOWFLAKE_PAT'` (or account/user) | a required value is missing from `.env` — `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PAT`. |
+| session auth error (invalid password/token) | the PAT is wrong/expired or not scoped to `SNOWFLAKE_ROLE`. Regenerate it. |
 | `SQL_TOOL=cortex needs a semantic layer…` | set `CORTEX_SEMANTIC_VIEW` **or** `CORTEX_SEMANTIC_MODEL`. |
 | HTTP **401/403** on the Analyst call | PAT invalid/expired, or the role lacks Cortex. Regenerate the PAT; confirm `SNOWFLAKE.CORTEX_USER`. |
 | HTTP **400** naming the semantic model/view | the view name/stage path is wrong or the role can't see it. Re-check `SHOW SEMANTIC VIEWS;`. |
+| `Unknown user-defined function SNOWFLAKE.CORTEX.COMPLETE` | your session role can't see Cortex. Grant `SNOWFLAKE.CORTEX_USER`, or set `SNOWFLAKE_SECONDARY_ROLES=all` so the session uses whichever granted role has it. |
+| `Incoming request with IP ... is not allowed` | a Snowflake **network policy** blocks this IP; run from an allowlisted network/VPN or have an admin allow your egress IP. |
 | SQL run error (table not found / no access) | the role can't SELECT the tables behind the view. Grant SELECT. |
 
-> Don't want to use a password locally? You can key-pair auth instead, but the shipped adapter
-> reads `SNOWFLAKE_PASSWORD`; wiring key-pair is a small change in `snowpark_session()`
-> (`engine/llm_client.py`). Ask if you want that.
+> Prefer key-pair auth over a PAT? That's a small change in `snowpark_session()`
+> (`engine/llm_client.py`) plus a key-pair for the REST call — ask if you want it wired.
 
 ---
 

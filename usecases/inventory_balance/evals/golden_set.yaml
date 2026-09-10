@@ -1,0 +1,5 @@
+# Portable golden questions for the inventory-balance pack. expect_contains = substrings the
+# best_answer must include (case-insensitive). These pass on the MOCK provider; when pointed at
+# the real INVENTORY_ANALYTICS view, replace with facts you can verify from live data.
+- question: "What is the total current on-hand inventory balance by location?"
+  expect_contains: ["25475", "SD-01"]

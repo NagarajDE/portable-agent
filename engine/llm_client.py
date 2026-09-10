@@ -153,19 +153,48 @@ class DatabricksClient:
 
 
 def sf_cfg() -> dict:
-    return {k: os.environ[f"SNOWFLAKE_{k.upper()}"]
-            for k in ("account", "user", "password", "warehouse", "role")}
+    """Local Snowpark connection config. Auth uses ONE secret -- the same SNOWFLAKE_PAT the
+    Cortex Analyst REST call uses -- passed in place of a password (Snowflake accepts a
+    Programmatic Access Token anywhere a password is accepted). There is deliberately no
+    separate SNOWFLAKE_PASSWORD. Account + user are required; warehouse/role/database/schema
+    are added when set, else the user's own defaults apply."""
+    # Pass ACCOUNT only (not host) and let the connector resolve the real endpoint -- forcing an
+    # explicit host can send the auth request to the wrong deployment and get a valid PAT rejected.
+    # (SNOWFLAKE_HOST is still used, separately, by the Cortex Analyst REST call.)
+    cfg = {"account": os.environ["SNOWFLAKE_ACCOUNT"],
+           "user": os.environ["SNOWFLAKE_USER"],
+           "password": os.environ["SNOWFLAKE_PAT"]}       # PAT used as the password (single secret)
+    for env, key in (("SNOWFLAKE_WAREHOUSE", "warehouse"), ("SNOWFLAKE_ROLE", "role"),
+                     ("SNOWFLAKE_DATABASE", "database"), ("SNOWFLAKE_SCHEMA", "schema")):
+        if os.getenv(env):
+            cfg[key] = os.environ[env]
+    return cfg
 
 
 # --- Snowflake auth shared by CortexClient (COMPLETE) and CortexAnalystTool (Analyst REST).
 #     Inside SPCS: use the OAuth token Snowflake injects at /snowflake/session/token.
-#     Locally:     fall back to SNOWFLAKE_* user/password (session) / SNOWFLAKE_PAT (REST).
+#     Locally:     ONE Programmatic Access Token (SNOWFLAKE_PAT) authenticates BOTH the Snowpark
+#                  session (as the password) and the Analyst REST call (as a bearer token).
 _SPCS_TOKEN = "/snowflake/session/token"
+
+
+def _apply_secondary_roles(session):
+    """Optionally activate secondary roles so the session uses the UNION of privileges from ALL
+    the user's granted roles -- needed when the primary SNOWFLAKE_ROLE lacks a grant some other
+    role has (e.g. SNOWFLAKE.CORTEX_USER, which otherwise makes SNOWFLAKE.CORTEX.COMPLETE look
+    like an 'unknown function'). Opt-in via SNOWFLAKE_SECONDARY_ROLES=all|none (unset = leave as-is;
+    wraps Snowpark's use_secondary_roles / the USE SECONDARY ROLES SQL command)."""
+    val = (os.getenv("SNOWFLAKE_SECONDARY_ROLES") or "").strip().lower()
+    if val in ("all", "none"):
+        session.use_secondary_roles(val)
+    elif val:
+        raise ValueError("SNOWFLAKE_SECONDARY_ROLES must be 'all', 'none', or unset")
+    return session
 
 
 def snowpark_session():
     """A Snowpark Session that works both inside SPCS (injected OAuth token) and locally
-    (SNOWFLAKE_* user/password via sf_cfg)."""
+    (a single SNOWFLAKE_PAT via sf_cfg -- no password). Honors SNOWFLAKE_SECONDARY_ROLES."""
     from snowflake.snowpark import Session
     if os.path.exists(_SPCS_TOKEN):
         with open(_SPCS_TOKEN) as f:
@@ -177,12 +206,8 @@ def snowpark_session():
                          ("SNOWFLAKE_SCHEMA", "schema"), ("SNOWFLAKE_ROLE", "role")):
             if os.getenv(env):
                 cfg[key] = os.environ[env]
-        return Session.builder.configs(cfg).create()
-    cfg = sf_cfg()                                    # local: user/password from SNOWFLAKE_*
-    for env, key in (("SNOWFLAKE_DATABASE", "database"), ("SNOWFLAKE_SCHEMA", "schema")):
-        if os.getenv(env):
-            cfg[key] = os.environ[env]
-    return Session.builder.configs(cfg).create()
+        return _apply_secondary_roles(Session.builder.configs(cfg).create())
+    return _apply_secondary_roles(Session.builder.configs(sf_cfg()).create())   # local: single PAT
 
 
 def snowflake_rest_base() -> str:

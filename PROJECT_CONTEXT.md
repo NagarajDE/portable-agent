@@ -432,10 +432,12 @@ untouched, honoring the "vendor SDK only inside the adapter" rule.
 
 - **Auth is shared + dual-mode** (`engine/llm_client.py`): `snowpark_session()` +
   `snowflake_bearer_headers()`. Inside SPCS they use the OAuth token Snowflake injects at
-  `/snowflake/session/token` (no secrets); locally they fall back to `SNOWFLAKE_*` creds
-  (Snowpark session) and `SNOWFLAKE_PAT` (Analyst REST bearer).
-- **Config:** `CORTEX_SEMANTIC_MODEL` (Analyst), optional `CORTEX_MODEL`, a warehouse to
-  run SQL, and the `SNOWFLAKE.CORTEX_USER` role + data grants on the service's role.
+  `/snowflake/session/token` (no secrets); locally a SINGLE `SNOWFLAKE_PAT` authenticates
+  BOTH the Snowpark session (as the password) and the Analyst REST call (bearer) — no
+  `SNOWFLAKE_PASSWORD`.
+- **Config:** a semantic layer — `CORTEX_SEMANTIC_VIEW` (existing view) OR `CORTEX_SEMANTIC_MODEL`
+  (stage YAML), view wins if both set — optional `CORTEX_MODEL`, a warehouse to run SQL, and the
+  `SNOWFLAKE.CORTEX_USER` role + data grants on the service's role.
 - **Robustness:** vendor imports stay lazy (mock path unaffected — verified), ambiguous
   Analyst replies (no SQL) return the analyst's text instead of crashing, missing-token
   raises a clear actionable error. **Untested against a live account** (none available here);

@@ -1,0 +1,4 @@
+# Verified question -> SQL pairs (few-shot hints; also the seed you'd bless as Cortex verified
+# queries). Column/table names are placeholders -- adjust to the real INVENTORY_ANALYTICS model.
+- question: "Total on-hand inventory balance by location"
+  sql: "SELECT LOCATION, SUM(ON_HAND_QTY) AS ON_HAND_BALANCE FROM INVENTORY GROUP BY LOCATION ORDER BY ON_HAND_BALANCE DESC"
