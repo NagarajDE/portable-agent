@@ -140,8 +140,14 @@ View**, runs that SQL on your warehouse, and answers from the **real rows**.
 ### Try your own question / the offline eval gate
 
 ```powershell
+py -3 run_local.py inventory_balance "Which 5 items have the most stock?"   # one-shot question
+py -3 chat_local.py inventory_balance                                        # interactive: ask in a loop
 py -3 run_evals.py dq_qals      # runs the pack's golden questions through the full loop
 ```
+
+`chat_local.py` builds the graph once and lets you keep asking questions (blank line / `exit` /
+Ctrl-D to quit). Each question is an independent run (no memory of the previous one). Like
+`run_local.py` / `run_evals.py`, it's a **runner script** — it never modifies `engine/` or source.
 
 ### What breaks (and the fix)
 

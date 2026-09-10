@@ -108,6 +108,33 @@ def test_loop_preserves_best_answer(monkeypatch):
     assert f["answer"] == "A1"                       # latest revision != best_answer
 
 
+class _CapturingWorker:
+    """A scripted worker that also records each prompt it was given (to inspect what it built on)."""
+    def __init__(self, *replies):
+        self.replies, self.i, self.prompts = list(replies), 0, []
+
+    def complete(self, prompt, **k):
+        self.prompts.append(prompt)
+        v = self.replies[min(self.i, len(self.replies) - 1)]
+        self.i += 1
+        return v
+
+
+def test_refine_builds_from_best_not_latest(monkeypatch):
+    # A0 scores 16 (best), A1 scores 10 (worse). The 2nd refine must build from A0 (+A0's critique),
+    # NOT the degraded A1 -- the loop must not walk downhill (#1).
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
+        "max_score": 18, "pass_score": 18, "max_iters": 2, "eval_retries": 0,
+        "default_sql_tool": "mock"})
+    worker = _CapturingWorker("A0", "A1", "A2")
+    judge = _Seq("SCORE: 16/18 - ok", "SCORE: 10/18 - worse", "SCORE: 11/18 - meh")
+    g = build_graph("dq_qals", llm=worker, eval_llm=judge, verbose=False)
+    f = g.invoke(initial_state("q"))
+    # prompts: [0]=generate, [1]=refine#1 (base A0), [2]=refine#2 (base MUST be A0, not A1)
+    assert "A0" in worker.prompts[2] and "A1" not in worker.prompts[2]
+    assert f["best_answer"] == "A0" and f["best_score"] == 16
+
+
 def test_loop_respects_max_iters(monkeypatch):
     g = _mk(monkeypatch, _Seq("A0", "A1", "A2"), _Seq("SCORE: 12/18 - low"), max_iters=2)
     f = g.invoke(initial_state("q"))

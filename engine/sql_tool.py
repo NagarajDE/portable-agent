@@ -16,15 +16,15 @@ class SQLTool(Protocol):
     def ask(self, question: str) -> str: ...      # returns rows as text
 
 
-def _rows_to_text(rows, max_rows: int = 100) -> str:
-    """Format Snowpark result rows into a compact text block for the LLM to read."""
+def _rows_to_text(rows) -> str:
+    """Format Snowpark result rows into a compact text block for the LLM to read. Truncation is
+    the CALLER's concern -- it slices to the cap and appends its own 'omitted' note -- so there is
+    no row-count branch here (the caller already limited the query to cap+1)."""
     if not rows:
         return "No rows."
-    dicts = [r.as_dict() for r in rows[:max_rows]]
+    dicts = [r.as_dict() for r in rows]
     cols = list(dicts[0].keys())
     lines = [" | ".join(cols)] + [" | ".join(str(d.get(c)) for c in cols) for d in dicts]
-    if len(rows) > max_rows:
-        lines.append(f"... ({len(rows) - max_rows} more rows)")
     return "\n".join(lines)
 
 
@@ -119,8 +119,9 @@ class CortexAnalystTool:
         body = {"messages": [{"role": "user",
                               "content": [{"type": "text", "text": question}]}],
                 **self._semantic}
+        rest_timeout = max(5, int(os.getenv("CORTEX_ANALYST_TIMEOUT_SECONDS", "60")))  # tunable, like SQL exec
         resp = requests.post(f"{snowflake_rest_base()}/api/v2/cortex/analyst/message",
-                             headers=snowflake_bearer_headers(), json=body, timeout=60)
+                             headers=snowflake_bearer_headers(), json=body, timeout=rest_timeout)
         resp.raise_for_status()
         content = resp.json().get("message", {}).get("content", [])
         sql = next((c["statement"] for c in content if c.get("type") == "sql"), None)
@@ -132,7 +133,7 @@ class CortexAnalystTool:
         timeout = max(1, int(os.getenv("SQL_TIMEOUT_SECONDS", "30")))  # >=1: timeout=0 must not remove the bound
         rows = self._s.sql(sql).limit(max_rows + 1).collect(         # cap BEFORE collect() to bound memory
             statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": str(timeout)})
-        text = _rows_to_text(rows[:max_rows], max_rows)
+        text = _rows_to_text(rows[:max_rows])
         return text + ("\n... (additional rows omitted)" if len(rows) > max_rows else "")
 
 

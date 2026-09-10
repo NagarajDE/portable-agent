@@ -10,6 +10,12 @@ Host on Databricks with one shell file.
 > How the agent improves without retraining (evals vs. exemplars, the learning flywheel):
 > [`docs/concepts/evals-and-the-learning-flywheel.md`](docs/concepts/evals-and-the-learning-flywheel.md).
 >
+> How the refine loop works — refine-from-best, and `max_score` vs `pass_score`:
+> [`docs/concepts/the-refine-loop.md`](docs/concepts/the-refine-loop.md).
+>
+> Access control — who can call an agent, what it can read, and the per-user RLS end goal:
+> [`docs/concepts/access-control.md`](docs/concepts/access-control.md).
+>
 > Run locally on Windows against real Snowflake Cortex (or Databricks):
 > [`docs/run-locally-windows.md`](docs/run-locally-windows.md).
 

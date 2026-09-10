@@ -32,7 +32,8 @@ def main():
     final = traced_invoke(app, initial_state(task), use_case)
     remember_run(final, use_case)                   # episodic capture (no-op unless MEMORY_STORE set)
     print("-" * 68)
-    print(f"BEST SCORE : {final['best_score']}/{cfg.get('threshold', 18)}")
+    # denominator is max_score (the score's scale), NOT threshold/pass_score (the stop bar)
+    print(f"BEST SCORE : {final['best_score']}/{cfg.get('max_score', 18)}")
     print(f"BEST ANSWER: {final['best_answer']}\n")
 
 if __name__ == "__main__":

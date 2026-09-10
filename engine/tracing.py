@@ -210,15 +210,19 @@ def tracing_enabled() -> bool:
 
 
 def get_tracer(run_id: str, use_case: str) -> Tracer:
-    """One tracer per run_id, memoized so a run's nodes + run_start/run_end share it
-    (needed for OTel/MLflow span trees). Freed by `end_tracer` at run end."""
+    """The tracer for a run. STATEFUL sinks (OTel/MLflow span trees) are memoized per run_id so a
+    run's nodes + run_start/run_end share one instance, and freed by `end_tracer`. The default
+    STATELESS StdoutTracer is created fresh each call and NOT stored -- so a caller that bypasses
+    `traced_invoke` (e.g. a bare `graph.invoke()`) can't leak entries into `_active` (#4)."""
     if not tracing_enabled():
         return NullTracer()
+    b = _backend()
+    cls = _SINKS.get(b if b not in ("", "auto") else "stdout", StdoutTracer)
+    if cls is StdoutTracer:                              # stateless -> no memoization, nothing to leak
+        return cls(run_id, use_case)
     with _active_lock:
         t = _active.get(run_id)
         if t is None:
-            b = _backend()
-            cls = _SINKS.get(b if b not in ("", "auto") else "stdout", StdoutTracer)
             t = cls(run_id, use_case)
             _active[run_id] = t
         return t

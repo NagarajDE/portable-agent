@@ -216,6 +216,7 @@ Same engine every time; only the `platform_<name>/` shell changes.
 | Add Streamlit-in-Snowflake chat UI | Gives the SPCS path a "looks like Genie" front end |
 | Sync the GitHub remote | Remote lagged the local build (missing CLAUDE.md, 2 packs, platform_snowflake, etc.) |
 | (If portability becomes board-level) neutral semantic layer via dbt/OSI | The only real lever for cross-platform semantic reuse |
+| **Caller-identity propagation → true per-user RLS** (the access-control end goal) | Today SQL runs as the *service* role, so per-user row/column policies don't apply; run AS the caller to match native per-user governance (see §12.5, `docs/concepts/access-control.md`) |
 
 ---
 
@@ -331,13 +332,29 @@ single-agent case:
 
 Independent of the above, the **data layer stays governed by the warehouse**: the
 native tool runs SQL under a role, so table / row / column access is enforced by
-Snowflake / Databricks RBAC regardless of which agent is reached. (Deployment
-decision to settle later: run queries with the **caller's** privileges so native
-RBAC applies per-user, vs. the **service's** role which can over-grant.)
+Snowflake / Databricks RBAC. **But which identity?** Two access questions must not be
+conflated:
+
+- **Who may invoke the agent** — endpoint-level, solved today by the platform's RBAC on the
+  per-use-case service (one deploy per pack, `USE_CASE` fixes it).
+- **What data the agent may read** — execution-identity-level. **Today the loop runs SQL as the
+  SERVICE role, not the end user.** So per-*use-case* scoping works (give each service a role that
+  `SELECT`s only its domain), but per-*end-user* row-level security does **not** apply
+  automatically — two users on the same endpoint see the same rows.
+
+**End goal (deferred, to address later): propagate the caller's identity so SQL runs AS the user,
+making native per-user RLS / column masking / row policies apply for free** — matching what native
+Cortex Agents / Genie do in caller's-rights mode. This is the one authz capability native has that
+this design does not yet: closing it means a token exchange / caller-context step in
+`snowpark_session()` (and the Snowflake shell surfacing the ingress caller identity). Until then the
+access boundary is the **deployment boundary**: one agent per (use case × audience), each with a
+narrowly-scoped role.
 
 **Takeaway:** for the stated goal (single-domain agents, one per domain), grant
-access the native way — one deployable service per pack — and reserve a gateway +
-custom authz only if/when a true multi-domain supervisor is wanted.
+access the native way — one deployable service per pack, scoped role per service — and reserve a
+gateway + custom authz only if/when a true multi-domain supervisor is wanted. **True per-user RLS
+via caller-identity propagation is the recorded end goal, parked for now.** See
+`docs/concepts/access-control.md`.
 
 ### 12.6 Framework note (LangGraph vs. Pydantic AI) + hardened judge (implemented)
 

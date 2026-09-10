@@ -257,7 +257,10 @@ deletion-by-request is a plain `DELETE`.
   authenticates BOTH the Snowpark session (as the password) and the Analyst REST call (bearer)
   — no `SNOWFLAKE_PASSWORD`. Needs a warehouse and a
   semantic layer — EITHER `CORTEX_SEMANTIC_VIEW` (an existing native Semantic View) OR
-  `CORTEX_SEMANTIC_MODEL` (a stage YAML); view wins if both set. Verified: imports stay lazy (mock path untouched),
+  `CORTEX_SEMANTIC_MODEL` (a stage YAML); view wins if both set. `CortexClient` uses the STRUCTURED
+  COMPLETE form (messages+options) to get `usage`, so it detects truncation via
+  `completion_tokens >= max_tokens` (Cortex exposes no `finish_reason`), falling back to the plain
+  string form if that call fails — never a regression. Verified: imports stay lazy (mock path untouched),
   row formatter + auth-error paths unit-tested; the live call is untested here (no account).
 - **Databricks/Genie are STILL STUBBED**: `DatabricksClient` / `GenieTool` have the SDK
   shape + a `TODO`. Wire like Cortex, and test with `SQL_TOOL=mock` first to isolate the
@@ -343,9 +346,15 @@ in sync with `git status`.
   mismatched denominator** and non-finite scores, re-asks `eval_retries` times, then falls back
   to score 0. Don't "simplify" back to a bare regex, and do NOT pull in an agent framework
   (Pydantic AI / instructor) for the generic core.
+- **Refine builds from the BEST answer, not the latest** (`refine` uses `best_answer` +
+  `best_feedback`, not `answer`/`feedback`). Otherwise a degraded revision becomes the base and
+  the loop walks downhill while paying full LLM calls. Don't "simplify" refine back to `s["answer"]`.
 - **Scoring knobs are separate:** `max_score` (validation cap, default 18) vs `pass_score`
-  (stop threshold, must be ≥1; `threshold` is the backward-compatible alias). `keep_going`
-  stops at `pass_score`; `parse_verdict` validates against `max_score`. `max_score` is
+  (stop threshold, must be ≥1; `threshold` is the backward-compatible alias, **default 15** in
+  `shared/config.yaml`). Keep it BELOW `max_score`: `pass_score == max_score` means only a perfect
+  score stops early, so a strict real judge runs every question to `max_iters` (worst-case latency
+  as the normal case). `keep_going` stops at `pass_score`; `parse_verdict` validates against `max_score`.
+  Report scores out of `max_score`, never `pass_score` (see `run_local.py`). `max_score` is
   genuinely configurable end-to-end: rubric prompts template the denominator as `SCORE:
   N/{max_score}` (filled in `evaluate`), the body's point-total says `{max_score}-point`, and
   the MockClient reads that scale from the prompt. Caveat: `max_score` is the rubric's *authored

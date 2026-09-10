@@ -183,6 +183,7 @@ class State(TypedDict):
     score: int
     best_answer: str
     best_score: int
+    best_feedback: str        # the critique that produced best_answer (refine builds from BEST)
     iterations: int
     run_id: str               # per-run id; the join key for observability (see engine/tracing.py)
 
@@ -260,16 +261,23 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         score = verdict.score
         feedback = f"SCORE: {score}/{max_score} - {verdict.reason}"
         log(f"  [evaluate] score {score}/{max_score}  ({verdict.reason})")
-        best_a, best_s = (s["answer"], score) if score > s.get("best_score", -1) \
-            else (s["best_answer"], s["best_score"])
+        if score > s.get("best_score", -1):            # keep the champion AND the critique of it
+            best_a, best_s, best_f = s["answer"], score, feedback
+        else:
+            best_a, best_s, best_f = s["best_answer"], s["best_score"], s.get("best_feedback", "")
         return {**s, "score": score, "feedback": feedback,
-                "best_answer": best_a, "best_score": best_s}
+                "best_answer": best_a, "best_score": best_s, "best_feedback": best_f}
 
     def refine(s: State) -> State:
         nxt = s["iterations"] + 1
+        # Refine from the BEST answer so far (with the critique that produced it), NOT the latest
+        # revision -- otherwise a degraded revision becomes the base and the loop walks downhill,
+        # paying full LLM calls to do it. First refine is unchanged (best == latest == rev0).
+        base_answer = s.get("best_answer") or s["answer"]
+        base_feedback = s.get("best_feedback") or s["feedback"]
         answer = llm.complete(fill(_prompt(use_case, "refine.md"),
-                                   task=s["task"], answer=s["answer"], data=s.get("data", ""),
-                                   feedback=s["feedback"], skills=skills, revision=nxt))
+                                   task=s["task"], answer=base_answer, data=s.get("data", ""),
+                                   feedback=base_feedback, skills=skills, revision=nxt))
         log(f"  [refine]   rev{nxt} -> {answer}")
         return {**s, "answer": answer, "iterations": nxt}
 
@@ -291,5 +299,5 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
 
 def initial_state(task: str) -> State:
     return {"task": task, "data": "", "answer": "", "feedback": "",
-            "score": -1, "best_answer": "", "best_score": -1, "iterations": 0,
-            "run_id": uuid.uuid4().hex[:12]}
+            "score": -1, "best_answer": "", "best_score": -1, "best_feedback": "",
+            "iterations": 0, "run_id": uuid.uuid4().hex[:12]}

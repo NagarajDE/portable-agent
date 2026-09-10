@@ -108,12 +108,36 @@ class AnthropicClient:
 
 
 class CortexClient:
-    """Snowflake Cortex COMPLETE via a Snowpark session (SPCS OAuth token or local creds)."""
+    """Snowflake Cortex COMPLETE via a Snowpark session (SPCS OAuth token or local creds).
+    Uses the STRUCTURED form (messages + options) which returns usage, so we can detect
+    truncation the way AnthropicClient/DatabricksClient do -- Cortex exposes no `finish_reason`,
+    so the signal is `completion_tokens >= max_tokens` (it stopped because it hit the cap). If the
+    structured call fails for any reason, we fall back to the plain string form (no detection, but
+    never a regression)."""
     def __init__(self, model: str | None = None):
         self._s = snowpark_session()
         self._model = model or os.getenv("CORTEX_MODEL", "claude-3-5-sonnet")
 
     def complete(self, prompt: str, **kw) -> str:
+        import json
+        max_tokens = _max_tokens()
+        try:
+            row = self._s.sql(
+                "SELECT SNOWFLAKE.CORTEX.COMPLETE(?, PARSE_JSON(?), PARSE_JSON(?)) AS R",
+                params=[self._model,
+                        json.dumps([{"role": "user", "content": prompt}]),
+                        json.dumps({"max_tokens": max_tokens})]).collect()[0]
+            obj = json.loads(row["R"])
+            text = ((obj.get("choices") or [{}])[0].get("messages") or "").strip()
+            if text:
+                if (obj.get("usage") or {}).get("completion_tokens", 0) >= max_tokens:
+                    raise RuntimeError("Cortex output truncated (hit max_tokens); raise LLM_MAX_TOKENS")
+                return text
+            # empty/unexpected shape -> fall through to the simple form below
+        except RuntimeError:
+            raise                                     # truncation is a real signal; propagate it
+        except Exception:
+            pass                                      # structured form unavailable -> simple form
         row = self._s.sql("SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS R",
                           params=[self._model, prompt]).collect()[0]
         text = row["R"]

@@ -1,5 +1,9 @@
 # Defaults inherited by any pack whose config declares: inherits: [shared]
-threshold: 18
+# threshold = pass_score = the stop bar (out of max_score, default 18). 15/18 ~= avg 5/6 per axis:
+# "good enough", so a strict judge stops early instead of grinding to max_iters on every question.
+# A perfect 18 is rare from a real judge -> leaving this at 18 makes the worst-case call count the
+# NORMAL case. Raise per pack for stricter quality, lower for faster/cheaper. (See PROJECT_CONTEXT.)
+threshold: 15
 max_iters: 4
 eval_retries: 1        # extra judge re-asks if its verdict can't be parsed (total tries = 1 + this)
 default_sql_tool: mock
