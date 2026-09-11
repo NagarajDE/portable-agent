@@ -71,35 +71,43 @@ def test_http_mock_mode_returns_canned():
 
 
 # --- fake `requests` for the real GET path --------------------------------
+class _Raw:
+    """A STATEFUL raw stream: successive read()s advance a cursor (so a chunked reader terminates),
+    and an optional exception is raised on the first read (to drive the body-error retry path)."""
+    def __init__(self, body, read_exc=None):
+        self._body, self._pos, self._read_exc = body, 0, read_exc
+
+    def read(self, n, decode_content=True):
+        if self._read_exc is not None:
+            exc, self._read_exc = self._read_exc, None
+            raise exc
+        chunk = self._body[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        return chunk
+
+
 class _Resp:
-    def __init__(self, status=200, headers=None, body=b"", raise_for=None):
-        self.status_code, self.headers, self._body, self._raise = status, headers or {}, body, raise_for
+    def __init__(self, status=200, headers=None, body=b"", raise_for=None, read_exc=None):
+        self.status_code, self.headers, self._raise = status, headers or {}, raise_for
         self.is_redirect = status in (301, 302, 303, 307, 308)
+        self.raw = _Raw(body, read_exc)              # persistent + stateful
 
     def raise_for_status(self):
         if self._raise:
             raise self._raise
-
-    @property
-    def raw(self):
-        body = self._body
-        class _Raw:
-            def read(self, n, decode_content=True):
-                return body[:n]
-        return _Raw()
 
     def close(self):
         pass
 
 
 class _FakeSession:
-    """Models requests.Session: records (url, headers) per hop, replays scripted responses,
+    """Models requests.Session: records (url, headers, params) per hop, replays scripted responses,
     and lets a scripted Exception be raised (to drive the retry path)."""
     def __init__(self, responses, calls):
         self._responses, self.calls, self.trust_env = responses, calls, True
 
     def get(self, url, headers=None, params=None, timeout=None, allow_redirects=None, stream=None):
-        self.calls.append((url, dict(headers or {})))
+        self.calls.append((url, dict(headers or {}), dict(params or {})))
         item = self._responses.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -115,7 +123,7 @@ class _FakeRequests:
 
     def __init__(self, *responses):
         self._responses = list(responses)
-        self.calls = []            # (url, headers) across all hops/sessions
+        self.calls = []            # (url, headers, params) across all hops/sessions
 
     def Session(self):
         return _FakeSession(self._responses, self.calls)
@@ -146,7 +154,7 @@ def test_http_bearer_token_comes_from_env_only(fake_requests, monkeypatch):
     tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
                                "allow_hosts": ["example.com"], "token_env": "MY_API_TOKEN"})
     dispatch(tool, {"path": "/x"}, _ctx())
-    _, headers = fake.calls[0]
+    headers = fake.calls[0][1]
     assert headers.get("Authorization") == "Bearer SECRET-TOKEN-XYZ"    # value from env, not config
 
 
@@ -155,7 +163,7 @@ def test_http_no_token_env_means_no_auth_header(fake_requests):
     tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
                                "allow_hosts": ["example.com"]})
     dispatch(tool, {"path": "/x"}, _ctx())
-    _, headers = fake.calls[0]
+    headers = fake.calls[0][1]
     assert "Authorization" not in headers
 
 
@@ -165,7 +173,7 @@ def test_http_redirect_to_disallowed_host_is_blocked(fake_requests):
     tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
                                "allow_hosts": ["example.com"], "max_redirects": 3})
     r = dispatch(tool, {"path": "/x"}, _ctx())
-    assert not r.ok                                    # normalized failure, never followed off-allowlist
+    assert not r.ok and "allowlist" in r.error.message   # rejected for the RIGHT reason (off-allowlist)
 
 
 def test_http_redirect_within_allowlist_is_followed(fake_requests):
@@ -222,7 +230,7 @@ def test_allow_hosts_explicit_empty_denies(fake_requests, monkeypatch):
     tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
                                "allow_hosts": []})              # ...but explicit [] must NOT fall back
     r = dispatch(tool, {"path": "/x"}, _ctx())
-    assert not r.ok                                            # host denied
+    assert not r.ok and "allowlist" in r.error.message        # host denied (no env fallback)
 
 
 def test_allow_hosts_string_is_single_host(fake_requests):
@@ -243,11 +251,58 @@ def test_path_absolute_url_rejected(fake_requests):
     fake_requests(_Resp(200, body=b"x"))
     tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
                                "allow_hosts": ["example.com"]})
-    assert not dispatch(tool, {"path": "http://evil.com/"}, _ctx()).ok
+    r = dispatch(tool, {"path": "http://evil.com/"}, _ctx())
+    assert not r.ok and "relative" in r.error.message
 
 
 def test_path_dotdot_rejected(fake_requests):
     fake_requests(_Resp(200, body=b"x"))
     tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
                                "allow_hosts": ["example.com"]})
-    assert not dispatch(tool, {"path": "../../admin"}, _ctx()).ok
+    r = dispatch(tool, {"path": "../../admin"}, _ctx())
+    assert not r.ok and "segment" in r.error.message
+
+
+def test_path_dotdot_with_query_rejected(fake_requests):
+    # M12: `..?x=1` has no '/' delimiter, but the PATH COMPONENT is '..' -> must still be rejected
+    fake_requests(_Resp(200, body=b"x"))               # queued 200: if the check regressed this would pass ok
+    tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
+                               "allow_hosts": ["example.com"]})
+    r = dispatch(tool, {"path": "..?x=1"}, _ctx())
+    assert not r.ok and "segment" in r.error.message
+
+
+def test_validate_url_rejects_any_userinfo():
+    # L1: empty userinfo (`@host`) is falsy but must still be rejected
+    for u in ("https://user:pw@api.example.com/x", "https://@api.example.com/x",
+              "https://user@api.example.com/x"):
+        with pytest.raises(ValueError):
+            H.validate_url(u, ["example.com"])
+
+
+def test_http_retry_after_redirect_keeps_query(fake_requests):
+    # N1: a redirect clears the querystring for the redirected hop; a subsequent retry must restart
+    # from the ORIGINAL url WITH the original query (not the cleared one).
+    fake = fake_requests(
+        _Resp(302, headers={"Location": "https://api.example.com/moved"}),  # attempt1 hop0 -> redirect
+        _FakeRequests.ConnectionError("dropped"),                            # attempt1 hop1 -> transient
+        _Resp(200, body=b"OK"),                                              # attempt2 hop0 -> success
+    )
+    tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
+                               "allow_hosts": ["example.com"], "retries": 1, "backoff_s": 0})
+    r = dispatch(tool, {"path": "/x", "query": {"tenant": "A"}}, _ctx())
+    assert r.ok and "OK" in r.output
+    assert fake.calls[-1][2] == {"tenant": "A"}         # final (successful) request kept the query
+
+
+def test_http_body_read_error_is_retried(fake_requests):
+    # N2: a raw urllib3 error during body read must be retried, not terminate immediately
+    import urllib3
+    fake = fake_requests(
+        _Resp(200, body=b"", read_exc=urllib3.exceptions.ProtocolError("boom")),  # attempt1 read fails
+        _Resp(200, body=b"RECOVERED"),                                            # attempt2 ok
+    )
+    tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
+                               "allow_hosts": ["example.com"], "retries": 1, "backoff_s": 0})
+    r = dispatch(tool, {"path": "/x"}, _ctx())
+    assert r.ok and "RECOVERED" in r.output and len(fake.calls) == 2

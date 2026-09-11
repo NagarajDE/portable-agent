@@ -116,12 +116,14 @@ tools:
 
 | `tools:` in config | `load_tools` returns | behavior |
 |---|---|---|
-| **absent** (or `tools: null`) | `None` | legacy `get_sql_tool().ask()` path — **existing SQL packs untouched** |
+| **absent** (no `tools:` key) | `None` | legacy `get_sql_tool().ask()` path — **existing SQL packs untouched** |
 | **`tools: []`** (explicit empty) | `[]` | a deliberately **toolless** agent — no tools *and* no SQL |
 | **`tools: [ … ]`** | list of tools | run the declared read-only tools |
 
-A `tools:` value that is present but not a list (`{}`, `false`, a string) is a **config error** and
-raises — it is never silently coerced to empty.
+A present-but-invalid `tools:` — **null**, or any non-list (`{}`, `false`, a string) — is a
+**config error** and raises: only an *absent* key is the implicit legacy path, and a stray
+`tools:` (null) is treated as a mistake rather than silently meaning legacy. Use `tools: []` for a
+deliberately toolless agent.
 
 ---
 
@@ -131,7 +133,7 @@ Registered in the `engine/tools/registry` on import; construct via `build_tool(t
 
 | type | file | what it does | safety notes |
 |---|---|---|---|
-| `sql` | `sql_bridge.py` | **compatibility layer** — wraps `engine.sql_tool.get_sql_tool()` so SQL is one tool category. New multi-tool packs use it; legacy packs don't (they keep the direct path). | read-only; vendor SDK stays lazy |
+| `sql` | `sql_bridge.py` | **compatibility layer** — wraps `engine.sql_tool.get_sql_tool()` so SQL is one tool category. New multi-tool packs use it; legacy packs don't (they keep the direct path). | read-only; vendor SDK stays lazy; forwards `ctx.timeout_s` to adapters whose `ask()` accepts it |
 | `mock` | `mock_tool.py` | deterministic in-process tool (canned output / echo). The generic stand-in for creds-free demos and tests. | `read_only` configurable *only* on the mock, so tests can exercise the approval gate |
 | `http` | `http_tool.py` | the **one generic HTTP GET reference**. Any API-backed pack reuses it with config — no vendor connectors. | see below |
 

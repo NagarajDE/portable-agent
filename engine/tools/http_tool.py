@@ -108,7 +108,7 @@ def validate_url(url: str, allowlist) -> str:
     u = urlsplit(url)
     if u.scheme not in ("http", "https"):
         raise ValueError(f"blocked non-http(s) URL: {url!r}")
-    if u.username or u.password:                       # no credentials in the URL (L1)
+    if "@" in (u.netloc or ""):                       # ANY userinfo (incl. empty `@host`) rejected (L1)
         raise ValueError("URL must not contain userinfo")
     host = host_of(url)
     if not is_host_allowed(host, allowlist):
@@ -170,7 +170,7 @@ class HttpGetTool:
         pu = urlsplit(path)
         if pu.scheme or pu.netloc:                     # path must be RELATIVE (no scheme/host) (M12)
             raise ValueError("path must be relative (no scheme or host)")
-        if ".." in path.split("/"):                    # no parent-dir escape of the base path (M12)
+        if ".." in pu.path.split("/"):                 # check the PATH COMPONENT only, so '..?x=1' can't slip by (M12)
             raise ValueError("path must not contain '..' segments")
         if self._mode == "mock":                       # creds-free deterministic path
             body = self._mock.get(path, self._mock_default)
@@ -197,26 +197,45 @@ class HttpGetTool:
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
+    def _read_body(self, resp, deadline, requests) -> bytes:
+        """Read the body in bounded chunks, checking the wall-clock deadline between chunks so a
+        slow-drip response can't run indefinitely past ctx.timeout_s (M14). Capped at max_bytes+1
+        (the extra byte lets bound_output detect truncation). `raw` is accessed once (it's stateful)."""
+        raw = resp.raw
+        limit = self._max_bytes + 1
+        buf = bytearray()
+        while len(buf) < limit:
+            if time.monotonic() > deadline:
+                raise requests.Timeout("wall-clock deadline exceeded during body read")
+            chunk = raw.read(min(65536, limit - len(buf)), decode_content=True)
+            if not chunk:
+                break
+            buf += chunk
+        return bytes(buf)
+
     def _fetch(self, url: str, query: dict, ctx: ToolContext) -> str:
         import requests                                # lazy: only when a REAL call happens
+        import urllib3                                 # (a requests dependency) -> catch raw read errors
+        origin = _origin(url)                         # computed BEFORE the session (N3: nothing to leak on failure)
+        token = os.getenv(self._token_env) if self._token_env else None
+        deadline = time.monotonic() + max(0.1, float(ctx.timeout_s))   # wall-clock bound (M14)
+        retryable = (requests.ConnectionError, requests.Timeout, urllib3.exceptions.HTTPError)
         session = requests.Session()
         session.trust_env = False                     # ignore env proxies / .netrc / ambient creds (L1)
-        deadline = time.monotonic() + max(0.1, float(ctx.timeout_s))   # wall-clock bound (M14)
-        token = os.getenv(self._token_env) if self._token_env else None
-        origin = _origin(url)                         # token is bound to THIS origin + https only (H6)
         last_exc = None
         try:
             for attempt in range(self._retries + 1):
                 try:
                     current, hops = url, 0
-                    while True:
+                    params = dict(query)              # PER-ATTEMPT copy: a redirect clears the local copy,
+                    while True:                       # never the original -> retries keep the query (N1)
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise requests.Timeout("wall-clock deadline exceeded")
                         validate_url(current, self._allow)             # re-validate right before connect (H5)
                         send_token = (token if (token and urlsplit(current).scheme == "https"
                                                 and _origin(current) == origin) else None)
-                        resp = session.get(current, headers=self._headers(send_token), params=query,
+                        resp = session.get(current, headers=self._headers(send_token), params=params,
                                            timeout=max(0.1, remaining), allow_redirects=False, stream=True)
                         try:
                             if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
@@ -224,17 +243,16 @@ class HttpGetTool:
                                 if hops >= self._max_redirects or not loc:
                                     raise ValueError("too many redirects or missing Location")
                                 current = urljoin(current, loc)        # re-validated at top of loop
-                                query = {}                             # querystring already applied on hop 1
+                                params = {}                            # querystring already applied on hop 1
                                 hops += 1
                                 continue
                             resp.raise_for_status()
-                            body = resp.raw.read(self._max_bytes + 1, decode_content=True)
-                            return body.decode("utf-8", errors="replace")
+                            return self._read_body(resp, deadline, requests).decode("utf-8", errors="replace")
                         finally:
                             resp.close()                               # always close (M15)
-                except (requests.ConnectionError, requests.Timeout) as e:   # transient -> retry w/ backoff
+                except retryable as e:                # transient (incl. raw urllib3 read errors) -> retry (N2)
                     last_exc = e
-                    if attempt < self._retries and self._backoff_s:
+                    if attempt < self._retries:
                         nap = min(self._backoff_s * (2 ** attempt), max(0.0, deadline - time.monotonic()))
                         if nap > 0:
                             time.sleep(nap)

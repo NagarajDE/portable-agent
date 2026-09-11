@@ -378,10 +378,10 @@ in sync with `git status`.
   `_ensure_read_only()` (single statement, SELECT/WITH only) with a `SQL_TIMEOUT_SECONDS` cap —
   a backstop; the PRIMARY control is granting the service role SELECT-only (see the deploy guide).
 - **Generic tool layer (`engine/tools/`): SQL is ONE tool category, not the engine's assumption.**
-  Packs declare tools in `config.yaml` (`tools:`). Routing (in `load_tools`): NO `tools:` key (or
-  `tools:` null) → legacy `get_sql_tool().ask()` path (existing packs unchanged); `tools: []` → a
-  deliberately TOOLLESS agent (no tools AND no SQL); a `tools:` value that isn't a list → config
-  error. Tool execution is **deterministic** (the engine runs read-only tools up front and feeds
+  Packs declare tools in `config.yaml` (`tools:`). Routing (in `load_tools`): ONLY an ABSENT
+  `tools:` key → legacy `get_sql_tool().ask()` path (existing packs unchanged); `tools: []` → a
+  deliberately TOOLLESS agent (no tools AND no SQL); `tools:` that is null or not a list → config
+  error (null is treated as a mistake, never implicit legacy). Tool execution is **deterministic** (the engine runs read-only tools up front and feeds
   observations into `generate` ONCE per run; the LLM does NOT select tools — so tool output can't
   trigger a tool call, and refine never re-runs them). ReAct is deferred behind the same
   `dispatch()`. Invariants: every call goes through `dispatch()` (defensive `spec` access → approval
@@ -392,7 +392,9 @@ in sync with `git status`.
   e.g. a mutating GET); side-effecting tools run only when `ctx.approved is True` (strict); keep any
   vendor SDK import lazy (inside `run`). The `http` tool binds its bearer token to the ORIGINAL https
   origin (never forwarded across a redirect or over an http downgrade), uses a `trust_env=False`
-  session, re-validates host+SSRF before every connect, and enforces a wall-clock deadline. See
+  session, re-validates host+SSRF before every connect, and enforces a wall-clock deadline (bounding
+  the chunked body read too). Residual (accepted): the resolved IP is not pinned to the socket, so
+  the **allowlist is the primary control** against DNS rebinding. See
   [`docs/concepts/tools-and-agents.md`](docs/concepts/tools-and-agents.md).
 - Keep observability OUT of the loop. `graph.py` nodes are pure; all tracing lives in
   `engine/tracing.py` and is applied via `instrument(...)` (node wrapper) + `traced_invoke`

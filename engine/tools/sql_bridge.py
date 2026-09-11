@@ -9,6 +9,7 @@ only when the wrapped SQL tool is first built), so the mock path never needs the
 """
 from __future__ import annotations
 
+import inspect
 import threading
 
 from pydantic import BaseModel, ConfigDict
@@ -47,8 +48,22 @@ class SqlBridgeTool:
                     self._inner = get_sql_tool(self._use_case, self._default)
         return self._inner
 
+    @staticmethod
+    def _accepts_timeout(ask) -> bool:
+        """True if the adapter's ask() declares a `timeout_s` param (or **kwargs). Lets us forward
+        ctx.timeout_s to adapters that support it WITHOUT changing the SQLTool.ask(question) contract
+        or breaking adapters that don't (H2) -- the transport timeout is then enforced adapter-side,
+        which the caller-side future.cancel() cannot do for an already-running query."""
+        try:
+            params = inspect.signature(ask).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(p.name == "timeout_s" or p.kind == p.VAR_KEYWORD for p in params)
+
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
-        text = self._tool().ask(input["question"])
+        tool = self._tool()
+        kwargs = {"timeout_s": ctx.timeout_s} if self._accepts_timeout(tool.ask) else {}
+        text = tool.ask(input["question"], **kwargs)
         return ToolResult(ok=True, output=text if text is not None else "")
 
 

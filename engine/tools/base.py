@@ -84,13 +84,19 @@ def bound_output(text: str, max_chars: int = DEFAULT_MAX_OUTPUT_CHARS) -> str:
 
 # Redaction for LOG lines / error messages -- never let a credential land in observability.
 # Ordered (pattern, replacement) pairs. Covers bearer tokens, sensitive key/value pairs in the
-# common shapes (env `k=v`, log `k: v`, AND JSON/dict `"k": "v"` / `'k': 'v'` -- the quoted forms
-# that a naive `\bkey\b\s*[:=]` misses because the quote sits between key and separator), secrets
-# embedded in URL userinfo (scheme://user:pass@host, as leaked by some SDK error strings), and JWTs.
+# common shapes -- env `k=v`, log `k: v`, AND JSON/dict `"k": "v"` / `'k': 'v'` including QUOTED
+# values that contain spaces (`"password": "alpha beta"`) -- secrets embedded in URL userinfo
+# (scheme://user:pass@host, as leaked by some SDK error strings), and JWTs. Best-effort defense in
+# depth (a bare, unquoted secret containing spaces is only redacted up to the first space).
+_SECRET_KEYS = r"authorization|token|password|passwd|pat|secret|api[_-]?key"
 _REDACT_PATTERNS = (
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)((?:authorization|token|password|passwd|pat|secret|api[_-]?key)"
-                r"[\"']?\s*[:=]\s*[\"']?)[^\s,;\"'}\])]+"), r"\1[REDACTED]"),
+    # quoted value (may contain spaces): key: "alpha beta"  /  "key": 'v'
+    (re.compile(rf"(?i)((?:{_SECRET_KEYS})[\"']?\s*[:=]\s*)([\"'])(?:(?!\2).)*\2"),
+     r"\1\2[REDACTED]\2"),
+    # unquoted value: key=hunter2  /  "key": abc
+    (re.compile(rf"(?i)((?:{_SECRET_KEYS})[\"']?\s*[:=]\s*)[^\s,;\"'}}\])]+"), r"\1[REDACTED]"),
+    # credentials in URL userinfo: scheme://user:pass@host
     (re.compile(r"(?i)([a-z][a-z0-9+.\-]*://)[^/@\s:]+:[^/@\s]+@"), r"\1[REDACTED]@"),
     (re.compile(r"\beyJ[A-Za-z0-9._\-]{10,}"), "[REDACTED_JWT]"),          # JWT-ish
 )

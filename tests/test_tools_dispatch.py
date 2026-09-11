@@ -126,10 +126,14 @@ def test_redact_scrubs_common_secret_shapes():
 
 
 # --- orchestrator: deterministic, read-only auto-run ----------------------
-def test_load_tools_none_for_legacy_pack():
-    # a pack with NO `tools:` key -> None (signals the legacy single-SQL path in graph)
+def test_load_tools_none_only_for_absent_key():
+    # ONLY an absent `tools:` key -> None (the legacy single-SQL path)
     assert load_tools("some_uc", {"default_sql_tool": "mock"}) is None
-    assert load_tools("some_uc", {"tools": None}) is None       # `tools:` null is also legacy
+
+
+def test_load_tools_null_tools_raises():
+    with pytest.raises(ValueError):
+        load_tools("uc", {"tools": None})               # explicit null must NOT silently mean legacy (M6)
 
 
 def test_load_tools_empty_list_is_toolless():
@@ -258,3 +262,31 @@ def test_redact_scrubs_json_dict_and_url_forms():
     assert "hunter2" not in redact("{'password': 'hunter2'}")       # python dict repr
     assert "s3cr3t" not in redact("token=s3cr3t&x=1")               # querystring / env
     assert "secretpw" not in redact("https://user:secretpw@host/x") # URL userinfo
+
+
+def test_redact_scrubs_quoted_secret_with_spaces():
+    assert "beta" not in redact('{"password": "alpha beta"}')       # H4: quoted value with a space
+
+
+class _CountingWrite:
+    """A side-effecting tool that records whether run() ever executed."""
+    def __init__(self):
+        self.spec = ToolSpec("writer", "d", read_only=False, input_model=None)
+        self.ran = 0
+
+    def run(self, input, ctx):
+        self.ran += 1
+        return ToolResult(ok=True, output="did")
+
+
+def test_blocked_side_effecting_tool_never_executes():
+    tool = _CountingWrite()
+    r = dispatch(tool, {}, _ctx(approved=False))
+    assert not r.ok and r.error.kind == "approval_required"
+    assert tool.ran == 0                               # proves it was NOT executed, only blocked
+
+
+def test_returned_error_is_size_bounded():
+    from engine.tools.base import DEFAULT_MAX_ERROR_CHARS
+    r = dispatch(build_tool("mock", {"fail": "x" * 5000}), {}, _ctx())   # huge exception message
+    assert not r.ok and len(r.error.message) <= DEFAULT_MAX_ERROR_CHARS + 20

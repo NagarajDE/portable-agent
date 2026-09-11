@@ -39,18 +39,21 @@ def _ensure_builtins() -> None:
 
 
 def load_tools(use_case: str | None, cfg: dict) -> list[LoadedTool] | None:
-    """Build the pack's declared tools. Return semantics distinguish three cases (M6/M17):
-      * NO `tools:` key (or `tools:` null)  -> return None  -> caller takes the legacy SQL path
-        (existing packs are untouched).
-      * `tools: []`                          -> return []    -> a DELIBERATELY toolless agent
+    """Build the pack's declared tools. Routing is explicit (M6/M17):
+      * `tools:` key ABSENT               -> return None -> caller takes the legacy SQL path
+        (the ONLY implicit path -- existing packs are untouched).
+      * `tools: []`                        -> return []   -> a DELIBERATELY toolless agent
         (no tools AND no SQL).
-      * `tools: [ ... ]`                     -> return the built tools.
-    A `tools:` value that is present but not a list (e.g. `{}`, `false`, a string) is a config
-    error and raises -- it is never silently coerced to empty."""
+      * `tools: [ ... ]`                   -> return the built tools.
+      * `tools:` present but null / not a list -> raise (never silently fall through). `tools: null`
+        is almost always an accident, so it errors with guidance rather than quietly meaning legacy."""
     _ensure_builtins()
-    if "tools" not in cfg or cfg["tools"] is None:
+    if "tools" not in cfg:
         return None                                   # legacy: no tools declared -> SQL path
     entries = cfg["tools"]
+    if entries is None:
+        raise ValueError("`tools:` is null; use `tools: []` for a toolless agent, or OMIT the key "
+                         "entirely for the legacy SQL path")
     if not isinstance(entries, list):
         raise ValueError(f"`tools:` must be a list of tool entries, got {type(entries).__name__}")
     loaded: list[LoadedTool] = []
