@@ -120,11 +120,20 @@ class CortexAnalystTool:
                               "content": [{"type": "text", "text": question}]}],
                 **self._semantic}
         rest_timeout = max(5, int(os.getenv("CORTEX_ANALYST_TIMEOUT_SECONDS", "60")))  # tunable, like SQL exec
-        resp = requests.post(f"{snowflake_rest_base()}/api/v2/cortex/analyst/message",
-                             headers=snowflake_bearer_headers(), json=body, timeout=rest_timeout)
-        resp.raise_for_status()
+        url = f"{snowflake_rest_base()}/api/v2/cortex/analyst/message"
+        for attempt in range(2):                     # one light retry on a TRANSIENT blip (Bug 5);
+            try:                                     # 4xx/5xx raise HTTPError below and are NOT retried
+                resp = requests.post(url, headers=snowflake_bearer_headers(),
+                                     json=body, timeout=rest_timeout)
+                resp.raise_for_status()
+                break
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == 1:
+                    raise
         content = resp.json().get("message", {}).get("content", [])
-        sql = next((c["statement"] for c in content if c.get("type") == "sql"), None)
+        # a sql-typed item WITHOUT a statement must not KeyError -- skip it (falls to the text branch)
+        sql = next((c.get("statement") for c in content
+                    if c.get("type") == "sql" and c.get("statement")), None)
         if not sql:                                                  # ambiguous Q -> return the text
             texts = [c.get("text", "") for c in content if c.get("type") == "text"]
             return "\n".join(t for t in texts if t) or "Cortex Analyst returned no SQL."

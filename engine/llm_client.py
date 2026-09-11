@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import re
 import importlib
+import threading
 from typing import Protocol, runtime_checkable
 
 
@@ -84,9 +85,14 @@ def _next_rev(text: str) -> int:        # reads "NEXT_REVISION=N" from the instr
 # mock path never needs them installed. Fill the TODO, set the env var, done.
 # --------------------------------------------------------------------------
 def _max_tokens() -> int:
-    """Output token cap. Default 4096 -- ample for our short answers/one-line verdicts, so
-    truncation is unlikely; raise LLM_MAX_TOKENS if you generate longer outputs."""
-    return int(os.getenv("LLM_MAX_TOKENS", "4096"))
+    """Output token cap, CLAMPED to >= 1. Default 4096 -- ample for our short answers/one-line
+    verdicts, so truncation is unlikely; raise LLM_MAX_TOKENS if you generate longer outputs. A
+    non-integer raises a clear error here (only on the real-provider path; mock never calls this)
+    rather than a cryptic failure deep inside the provider SDK."""
+    try:
+        return max(1, int(os.getenv("LLM_MAX_TOKENS", "4096")))
+    except ValueError:
+        raise ValueError("LLM_MAX_TOKENS must be a positive integer")
 
 
 class AnthropicClient:
@@ -216,9 +222,9 @@ def _apply_secondary_roles(session):
     return session
 
 
-def snowpark_session():
-    """A Snowpark Session that works both inside SPCS (injected OAuth token) and locally
-    (a single SNOWFLAKE_PAT via sf_cfg -- no password). Honors SNOWFLAKE_SECONDARY_ROLES."""
+def _new_snowpark_session():
+    """Build a Snowpark Session -- inside SPCS (injected OAuth token) or locally (a single
+    SNOWFLAKE_PAT via sf_cfg -- no password). Honors SNOWFLAKE_SECONDARY_ROLES."""
     from snowflake.snowpark import Session
     if os.path.exists(_SPCS_TOKEN):
         with open(_SPCS_TOKEN) as f:
@@ -232,6 +238,23 @@ def snowpark_session():
                 cfg[key] = os.environ[env]
         return _apply_secondary_roles(Session.builder.configs(cfg).create())
     return _apply_secondary_roles(Session.builder.configs(sf_cfg()).create())   # local: single PAT
+
+
+_session = None
+_session_lock = threading.Lock()
+
+
+def snowpark_session():
+    """MEMOIZED: ONE session serves the worker + judge Cortex clients + the Analyst SQL tool
+    (+ Snowflake memory) instead of 3-4 separate logins at startup (Bug 2). Note: a Snowpark
+    Session runs statements serially on one connection, so a graph shared across the FastAPI
+    shell's worker threads shares this session -- fine at low concurrency (min-instances 1); for
+    high concurrency give each thread its own session / use a pool."""
+    global _session
+    with _session_lock:
+        if _session is None:
+            _session = _new_snowpark_session()
+        return _session
 
 
 def snowflake_rest_base() -> str:

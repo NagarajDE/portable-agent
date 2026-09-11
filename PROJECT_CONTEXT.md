@@ -150,6 +150,23 @@ Real cost of a new agent: one persona paragraph + its own tuning.
     **park** threads/multi-turn, runtime recall, auto-consolidation, and a Databricks/Delta
     adapter. Built because it's the highest-value + simplest + most on-thesis memory; the
     rest isn't worth it yet. Loop stays pure; capture is fail-safe. (See §12.9.)
+15. **Loop resilience: refine from BEST, non-fatal refinement, no-progress stop** → `refine` builds
+    from `best_answer` + `best_feedback` (never walk downhill onto a degraded revision); a failed
+    refine keeps the scored best and ends the loop (only a first-`generate` failure is fatal); and
+    `max_stall` (default 2) stops a stuck deterministic loop. These protect answer quality and cost.
+    (See §12.14 / §12.15.)
+16. **`pass_score` defaults BELOW `max_score` (15/18)** → a perfect-score stop bar makes worst-case
+    latency the norm; 15/18 stops early when "good enough". Per-pack configurable; report scores out
+    of `max_score`, never `pass_score`. (See §12.14.)
+17. **Local Snowflake auth = ONE PAT; one memoized session; secondary roles optional** → a single
+    `SNOWFLAKE_PAT` authenticates the Snowpark session (as password) AND the Analyst REST (bearer) —
+    no `SNOWFLAKE_PASSWORD`; `snowpark_session()` is memoized (one login for all adapters);
+    `SNOWFLAKE_SECONDARY_ROLES=all` reaches Cortex via whichever granted role has `CORTEX_USER`.
+    Account resolves the host (don't force the org-URL host on the session). (See §12.16.)
+18. **The semantic layer is OPTIONAL — it's a dependency of the text-to-SQL tool, not the platform**
+    → only Cortex Analyst / Genie (AI-BI) need a Semantic View / Metric View. Non-BI use cases wire a
+    different `SQLTool` (fixed SQL, retrieval) or none, and are strictly MORE portable (nothing to
+    rebuild per platform). (See §12.18.)
 
 ---
 
@@ -211,7 +228,8 @@ Same engine every time; only the `platform_<name>/` shell changes.
 | Next step | Why it matters |
 |---|---|
 | Extract real Cortex verified queries → `exemplars/*.yaml` | Converts today's Snowflake-pooled tuning into portable git assets |
-| Test the wired Cortex path against a live account (semantic model + grants) | Cortex adapters are coded but unverified end-to-end on real Snowflake |
+| Finish live Cortex verification: end-to-end Analyst run + align `inventory_balance` exemplar SQL to the real view's columns | COMPLETE + PAT auth confirmed from the user's terminal (§12.16); the Analyst answer against the real view still needs a clean pass. **Rotate the PAT** (it appeared in transcript). |
+| Add a non-BI / tool-less pack + optional tool-less mode in `graph.py` (skip `sql.ask` when a pack declares no tool) | Proves the "no semantic layer needed" path (Decision #18); `generate` currently always calls the SQL tool |
 | Wire the Databricks/Genie adapters (mirror the Cortex wiring) | The other primary platform still runs on mock only |
 | Add Streamlit-in-Snowflake chat UI | Gives the SPCS path a "looks like Genie" front end |
 | Sync the GitHub remote | Remote lagged the local build (missing CLAUDE.md, 2 packs, platform_snowflake, etc.) |
@@ -618,3 +636,125 @@ pinned WORKER_MODEL). Tests 55 → **60**.
 the MLflow contract) — both previously-challenged rejections now verified correct. Still honestly
 open: Databricks adapter `predict()` remains untested here (no MLflow/workspace); Cortex string
 `COMPLETE` truncation undetectable without its structured form; run-wide deadline deferred.
+
+### 12.14 Fifth review — loop quality, scoring, truncation, scanner (applied vs. challenged)
+
+- **#1 Refine-from-best (applied, high value).** `refine` used `s["answer"]` (the latest revision),
+  so a rewrite that scored *worse* than an earlier one became the base — the loop could walk
+  downhill paying full LLM calls. Now `refine` builds from `best_answer` + a new `best_feedback`
+  (the critique that produced the champion). Greedy hill-climbing; never build on a degraded answer.
+  (Decision #15; doc `docs/concepts/the-refine-loop.md`.)
+- **#2 `pass_score` default 15, not 18 (applied).** `threshold == max_score` means only a *perfect*
+  score stops early, so a strict real judge runs every question to `max_iters` — worst-case latency
+  as the normal case. Default is now 15/18 (~avg 5/6 per axis), per-pack overridable. Also fixed a
+  latent display bug: `run_local.py` printed the score out of `threshold`; now out of `max_score`.
+  (Decision #16.)
+- **#5 Cortex truncation detection (applied).** `CortexClient` now uses the STRUCTURED COMPLETE form
+  (messages+options) to read `usage.completion_tokens` and raises on `>= max_tokens` (Cortex exposes
+  no `finish_reason`), **falling back to the plain string form** if the structured call fails — never
+  a regression. Untested live (no account here).
+- **#4 Tracer leak (applied).** `get_tracer` no longer memoizes the stateless `StdoutTracer` into the
+  process-global `_active` dict, so a bare `graph.invoke()` (bypassing `traced_invoke`) can't leak.
+- **NB1 SQL scanner (applied, then hardened).** Replaced the sequential-regex multi-statement check
+  with a single left-to-right scanner (`_blank_strings_and_comments`) tracking `'…'`, `$$…$$`,
+  `--`, `/* */`; then hardened for backslash escapes (`\'`) and double-quoted identifiers (`"…"`)
+  after a follow-up flagged those Snowflake lexical forms. Still a defense-in-depth heuristic; the
+  SELECT-only grant is the boundary. Exotic forms (nested block comments) remain an accepted limit.
+- **Semantic view support (applied).** `CortexAnalystTool` accepts EITHER `CORTEX_SEMANTIC_VIEW` (an
+  existing native Semantic View) OR `CORTEX_SEMANTIC_MODEL` (a stage YAML); view wins. Env resolved
+  BEFORE opening the session, so a missing layer fails with a clear message first.
+- **Challenged:** rejecting `max_score != 18` (would undo configurability) and auto-templating axis
+  weights (engine can't infer domain axes) — both left as documented author responsibility.
+- Tests 60 → **68**.
+
+### 12.15 Sixth review — resilience & resources (applied vs. challenged)
+
+- **Bug 1 — a failed refinement no longer discards a good answer (applied, highest value).**
+  `generate`/`refine` had no exception handling, so a worker `RuntimeError` (e.g. the #5 truncation)
+  propagated out of `graph.invoke()` and 500'd away an already-scored `best_answer`. `refine` now
+  catches `RuntimeError`/`EmptyResponseError`, keeps best, ends the loop; `generate` stays unguarded
+  (a first-draft failure has nothing to fall back to → fatal). (Decision #15.)
+- **Bug 2 — one memoized Snowpark session (applied).** `snowpark_session()` was building a fresh
+  login per adapter (worker + judge + Analyst + memory = 3–4 logins). Now module-level, lock-guarded,
+  one session serves all. Documented single-flight (serial statements) as the concurrency ceiling;
+  pool per-thread if high concurrency is ever needed. (Decision #17.)
+- **Bug 3 — no-progress stop (applied).** `max_stall` (default 2) ends the loop after N refines that
+  don't beat `best_score` — guards the deterministic refine-from-best "grind to `max_iters`" case.
+- **Bug 4 — `_max_tokens()` clamped (applied).** `max(1, …)` + a clear error on a non-int (real
+  provider path only; mock never calls it) instead of sending 0/negative or crashing deep in a call.
+- **Bug 5 — Analyst REST retry + `statement` fix (applied, partial).** Added a light retry on the
+  Analyst REST call (transient `ConnectionError`/`Timeout` only; 4xx/5xx still raise) — the one path
+  with zero resilience and it's on the fatal `generate` path. `c.get("statement")` (not `c["…"]`) so a
+  sql-typed item without a statement falls to the text branch instead of `KeyError`.
+- **Challenged:** Snowpark `COMPLETE` retry (the connector already retries transient connection
+  errors; a bespoke layer risks re-running costly calls) and prompts-loaded-per-node (negligible vs.
+  LLM latency; run_local rebuilds per invocation) — both left as-is with reasons. Structured-vs-string
+  token-cap difference left (the string fallback can't take options; fires only if structured fails).
+- Tests 68 → **77**.
+
+### 12.16 Live Cortex testing on real Snowflake (what we learned)
+
+First real run against the user's account (`illumina`, role `ILMN-SECGRP-GO-DE`, semantic view
+`OPERATIONS_DEV.OPERATIONS_SANDBOX.INVENTORY_ANALYTICS`). The pipeline is correct; the friction was
+all environment/auth, captured here so a new chat doesn't re-derive it:
+
+- **Single PAT auth (Decision #17).** A Snowflake **Programmatic Access Token** authenticates BOTH the
+  Snowpark session (passed **as the password**) and the Analyst REST call (as the bearer). We dropped
+  `SNOWFLAKE_PASSWORD` entirely. The PAT is a real Snowflake-issued JWT (`iss: SF:1009`), valid — the
+  earlier failures were never the token.
+- **Account vs. host.** `SNOWFLAKE_ACCOUNT=illumina` resolves to the correct endpoint on its own;
+  forcing `SNOWFLAKE_HOST` to the org-URL form (`ILMNORG-ILLUMINA…`) sent auth to the *wrong
+  deployment* and the PAT was rejected as invalid. Fix: account only for the session (`sf_cfg` does
+  NOT pass host); `SNOWFLAKE_HOST=illumina.snowflakecomputing.com` is used only by the REST call.
+- **Stale shell env shadowed `.env`.** The user's shell had `SNOWFLAKE_ACCOUNT`/`SNOWFLAKE_USER`
+  exported (wrong values), and `load_dotenv()` doesn't override existing OS vars → every run used the
+  wrong account/user. Fix: `run_local.py`/`chat_local.py` load `.env` with `override=True` so `.env`
+  is the local source of truth.
+- **Network policy.** From the Claude Bash environment the egress IP is blocked (`390422 … IP not
+  allowed`); from the **user's own terminal** (allowlisted / VPN) it connects. So live runs must be
+  done by the user, not from here.
+- **Cortex entitlement.** `Unknown user-defined function SNOWFLAKE.CORTEX.COMPLETE` = the session role
+  can't see Cortex. Fix: `SNOWFLAKE_SECONDARY_ROLES=all` (Snowpark `use_secondary_roles`) so the
+  session uses whichever granted role has `SNOWFLAKE.CORTEX_USER`; alternatively grant it to the role.
+- **Provider vs. model.** Worker/judge are each a *provider* (`WORKER_PROVIDER=cortex` = the engine)
+  PLUS a *model name* (`WORKER_MODEL=claude-opus-4-8`). Setting only `*_MODEL` (no `*_PROVIDER`)
+  silently fell back to `mock` — which ignores the model and returns canned fixtures (the "same answer
+  every time / only 3 locations" symptom).
+- **Status:** COMPLETE + PAT auth confirmed working from the user's terminal. Answer-quality alignment
+  to the real view's columns and a clean end-to-end Analyst run are the remaining live checks. **Rotate
+  the PAT** after testing — it appeared in this session's transcript.
+
+### 12.17 Local testing tooling (runner scripts, never engine)
+
+Testing conveniences live in **runner scripts**, never in `engine/` (enforced boundary):
+- `run_local.py` — one-shot: `py -3 run_local.py <pack> "your question"` (CLI arg > `$QUESTION` >
+  the pack's `sample_task`); loads `.env` with `override=True`.
+- `chat_local.py` — interactive REPL: builds the graph ONCE, ask questions in a loop (blank/`exit`/
+  Ctrl-D to quit); each question is an independent run (no multi-turn memory); survives a bad run.
+- `run_evals.py` — the golden-set pass/fail gate.
+- New env knobs added this arc: `CORTEX_SEMANTIC_VIEW`, `SNOWFLAKE_SECONDARY_ROLES`,
+  `CORTEX_ANALYST_TIMEOUT_SECONDS`, `max_stall`. All documented in `.env.example` /
+  `docs/run-locally-windows.md`.
+
+### 12.18 The semantic layer is OPTIONAL — non-BI use cases (Decision #18)
+
+Clarified that the semantic layer (Cortex Semantic View / Databricks Metric View) is a dependency of
+the **text-to-SQL tool only** (`CortexAnalystTool`/`GenieTool`) — the AI-BI path. The loop and the
+platform never require it. Three use-case classes:
+1. **AI-BI** (NL → SQL over metrics) — needs a semantic layer (`cortex`/`genie`).
+2. **Structured data, you own the SQL** (DQ rules, fixed/verified queries) — needs SELECT grants, NOT
+   a semantic view; wire a small fixed-SQL tool behind `SQLTool`.
+3. **No structured data** (doc/policy Q&A, classification, text/code review, reasoning) — no SQL tool
+   at all.
+Building without a semantic layer is **strictly more portable** (nothing to rebuild per platform —
+decision #2). One design note to act on later: `generate` currently always calls `sql.ask(...)`; a
+tool-less mode (a pack declaring no SQL tool → skip the fetch) is a ~5-line engine generalization
+worth adding when we build the first non-BI pack. (Parked; see Open items.)
+
+### 12.19 Concept docs written (index for a new chat)
+
+Readable write-ups added under `docs/concepts/` this arc:
+- `evals-and-the-learning-flywheel.md` — evals grade (not train); logged runs → curated exemplars/evals.
+- `the-refine-loop.md` — refine-from-best, `max_stall`, non-fatal refine, `max_score` vs `pass_score`.
+- `access-control.md` — invoke-access vs data-access, service-role today, caller-identity RLS end goal.
+Plus `docs/run-locally-windows.md` (Windows-first live-run guide). All linked from `README.md`.

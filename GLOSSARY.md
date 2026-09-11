@@ -85,8 +85,23 @@ grades it. We allow them to be different models so a model isn't grading its own
 **Verdict** — the judge's validated result: a score plus a short reason. We parse it into
 a typed object (not a fragile text scrape) and re-ask the judge if it comes back garbled.
 
-**Threshold / max_iters** — "good enough" score to stop at (18), and the most refine
-rounds to try before giving up.
+**max_score vs. pass_score (threshold)** — two different knobs. `max_score` (default 18) is the
+*scale* the judge scores on (the ceiling). `pass_score` (alias `threshold`, default **15**) is the
+*stop bar* — the loop stops refining once a score reaches it. `pass_score` does NOT cap the score;
+a best answer can still reach 18. Default is below max so a strict judge stops early instead of
+grinding every question to `max_iters`.
+
+**max_iters / max_stall** — two more stop conditions. `max_iters` (default 4) = the most refine
+rounds before giving up. `max_stall` (default 2) = stop early if that many refines in a row don't
+beat the best score (guards a stuck deterministic loop). Whichever triggers first ends the loop.
+
+**Refine-from-best** — each refine round improves the *best-scoring* answer so far (with the critique
+that produced it), not the latest revision — so a rewrite that scored worse never becomes the base.
+Greedy hill-climbing; you always get back the best answer seen.
+
+**Non-fatal refine** — if the worker errors mid-loop (e.g. output truncated), the run keeps the
+best answer already scored and stops, instead of failing the whole request. Only a failure on the
+very first draft is fatal (nothing to fall back to yet).
 
 ## Assets you own (the portable tuning)
 
@@ -118,8 +133,19 @@ platform's expected form: `platform_databricks/` (MLflow) or `platform_snowflake
 (a web service). The only file you rewrite to move platforms.
 
 **Semantic layer** — the platform-native definition of your tables/metrics (Snowflake
-Semantic View, Databricks Metric View) that the SQLTool reads. It is *native, not ours*,
-and is rebuilt per platform.
+Semantic View, Databricks Metric View) that the text-to-SQL tool reads to turn a question into SQL.
+It is *native, not ours*, and is rebuilt per platform. **It is OPTIONAL** — only the AI-BI path
+(Cortex Analyst / Genie) needs it; a use case that owns its SQL, or needs no SQL, doesn't (see
+Decision #18). Snowflake accepts two forms: an existing **Semantic View** (`CORTEX_SEMANTIC_VIEW`)
+or a **semantic model YAML** on a stage (`CORTEX_SEMANTIC_MODEL`).
+
+**PAT (Programmatic Access Token)** — a Snowflake token used for headless auth. Here, ONE
+`SNOWFLAKE_PAT` authenticates both the Snowpark session (passed as the password) and the Cortex
+Analyst REST call (as the bearer) — no separate `SNOWFLAKE_PASSWORD`.
+
+**Secondary roles** — a Snowflake session setting (`SNOWFLAKE_SECONDARY_ROLES=all`) that lets the
+session use the privileges of *all* your granted roles, not just the primary one — handy when your
+primary role lacks a grant (e.g. `SNOWFLAKE.CORTEX_USER`) that another role has.
 
 **Portability** — the whole point: your loop, prompts, rubric, exemplars, and evals move
 between Snowflake and Databricks unchanged; only the adapter and semantic layer are
@@ -153,3 +179,19 @@ our JSON events become queryable rows.
 
 **Inference table (Databricks)** — a Databricks table that auto-logs a serving endpoint's
 requests and responses.
+
+## Access control
+
+**Invoke access vs. data access** — two separate questions. *Invoke access* = who may call the
+agent (solved today: one endpoint per use case + the platform's RBAC on that endpoint). *Data
+access* = what the agent can read once called (today: the **service role's** grants — scope each
+service to only its domain's tables).
+
+**Service-role identity** — the loop runs SQL as the deployed service's role, not the end user's.
+So per-use-case scoping works, but per-*user* row-level security does NOT apply automatically (two
+users on one endpoint see the same rows).
+
+**Caller-identity propagation / true RLS (the end goal)** — the deferred target: pass the end user's
+identity so SQL runs *as the user* and the warehouse applies that user's row-level security / column
+masking / grants automatically — matching native caller's-rights agents. Parked; see
+`docs/concepts/access-control.md`.

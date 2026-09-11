@@ -135,6 +135,40 @@ def test_refine_builds_from_best_not_latest(monkeypatch):
     assert f["best_answer"] == "A0" and f["best_score"] == 16
 
 
+def test_worker_failure_on_refine_keeps_best(monkeypatch):
+    # Bug 1: a good rev0 is scored + stored; the worker then raises (e.g. truncation) on refine.
+    # The run must NOT crash -- it keeps the already-scored best answer.
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
+        "max_score": 18, "pass_score": 18, "max_iters": 3, "eval_retries": 0,
+        "max_stall": 0, "default_sql_tool": "mock"})
+    worker = _RaisingJudge("A0", RuntimeError("Cortex output truncated"))   # good rev0, then fail
+    g = build_graph("dq_qals", llm=worker, eval_llm=_Seq("SCORE: 12/18 - needs work"), verbose=False)
+    f = g.invoke(initial_state("q"))                       # must not raise
+    assert f["best_answer"] == "A0" and f["best_score"] == 12
+
+
+def test_worker_failure_on_generate_is_fatal(monkeypatch):
+    # Bug 1: a failure on the FIRST generate has nothing to fall back to -> it must propagate.
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
+        "max_score": 18, "pass_score": 18, "max_iters": 3, "eval_retries": 0,
+        "default_sql_tool": "mock"})
+    worker = _RaisingJudge(RuntimeError("truncated on first draft"))
+    g = build_graph("dq_qals", llm=worker, eval_llm=_Seq("SCORE: 12/18 - x"), verbose=False)
+    with pytest.raises(RuntimeError):
+        g.invoke(initial_state("q"))
+
+
+def test_no_progress_stops_early(monkeypatch):
+    # Bug 3: a deterministic worker refining the same base+critique reproduces the same answer,
+    # never beats best, and would grind to max_iters. max_stall stops it after N non-improving rounds.
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
+        "max_score": 18, "pass_score": 18, "max_iters": 5, "eval_retries": 0,
+        "max_stall": 2, "default_sql_tool": "mock"})
+    g = build_graph("dq_qals", llm=_Seq("SAME"), eval_llm=_Seq("SCORE: 12/18 - stuck"), verbose=False)
+    f = g.invoke(initial_state("q"))
+    assert f["iterations"] == 2 and f["best_score"] == 12  # stopped by stall, not max_iters (5)
+
+
 def test_loop_respects_max_iters(monkeypatch):
     g = _mk(monkeypatch, _Seq("A0", "A1", "A2"), _Seq("SCORE: 12/18 - low"), max_iters=2)
     f = g.invoke(initial_state("q"))

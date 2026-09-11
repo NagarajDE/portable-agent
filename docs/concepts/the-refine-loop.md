@@ -89,12 +89,24 @@ On the first refine there's only one answer (rev0), so best == latest and nothin
 behaviors only diverge once a rewrite has scored worse than an earlier one — i.e. exactly the
 downhill case this protects against. If every rewrite improves, the behavior is the same as before.
 
-### The one edge to know
+### The one edge to know — and its guard
 
 Could it get "stuck" — repeatedly refining the same best answer with the same feedback and never
-beating it? In theory, yes; in practice: (a) real models are stochastic, so each attempt differs;
-(b) `max_iters` bounds the total attempts; and (c) refine-from-latest would be *worse* here — it'd
-drift further down instead of holding at the best. So this caps the downside rather than creating one.
+beating it? With a **deterministic / low-temperature** worker, yes: same base + same critique →
+same output → same score → it never beats best, and it would grind through every `max_iters` round
+producing identical revisions (full paid LLM calls for zero movement).
+
+So there's a code guard: **`max_stall`** (default 2). The loop counts consecutive refines that
+*don't* beat `best_score`, and stops once that hits `max_stall`. A refine that *does* improve resets
+the counter. Set `max_stall: 0` in config to disable it. (This is separate from `max_iters`, the
+absolute cap; whichever triggers first ends the loop.)
+
+### If a refinement fails outright
+
+A refine call can also *fail* (e.g. the worker truncates or errors mid-loop). That is **non-fatal**:
+the loop keeps the `best_answer` it already scored and stops, rather than throwing away good work
+with an error. Only a failure on the **first** `generate` is fatal — there's nothing to fall back
+to yet.
 
 > **Do not "simplify" refine back to `s["answer"]`.** That reintroduces the downhill-drift bug.
 > This is noted in [`CLAUDE.md`](../../CLAUDE.md) conventions.

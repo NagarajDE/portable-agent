@@ -184,6 +184,7 @@ class State(TypedDict):
     best_answer: str
     best_score: int
     best_feedback: str        # the critique that produced best_answer (refine builds from BEST)
+    stall: int                # consecutive refines that did NOT beat best_score (no-progress stop)
     iterations: int
     run_id: str               # per-run id; the join key for observability (see engine/tracing.py)
 
@@ -198,8 +199,12 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     pass_score = cfg.get("pass_score", cfg.get("threshold", max_score))
     max_iters = cfg.get("max_iters", 4)
     eval_retries = cfg.get("eval_retries", 1)          # extra judge re-asks on unparseable output
+    max_stall = cfg.get("max_stall", 2)                # stop after this many refines that DON'T beat
+                                                       # best (0 = off). Guards the deterministic
+                                                       # refine-from-best "grind to max_iters" case.
     for _name, _val, _min in (("max_score", max_score, 1), ("pass_score", pass_score, 1),
-                              ("max_iters", max_iters, 0), ("eval_retries", eval_retries, 0)):
+                              ("max_iters", max_iters, 0), ("eval_retries", eval_retries, 0),
+                              ("max_stall", max_stall, 0)):
         if type(_val) is not int or _val < _min:       # `type is not int` also rejects bools
             raise ValueError(f"{_name} must be an integer >= {_min}")   # pass_score>=1: 0 would let a fallback-0 "pass"
     if pass_score > max_score:
@@ -262,11 +267,12 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         feedback = f"SCORE: {score}/{max_score} - {verdict.reason}"
         log(f"  [evaluate] score {score}/{max_score}  ({verdict.reason})")
         if score > s.get("best_score", -1):            # keep the champion AND the critique of it
-            best_a, best_s, best_f = s["answer"], score, feedback
-        else:
+            best_a, best_s, best_f, stall = s["answer"], score, feedback, 0
+        else:                                          # no improvement -> count it toward no-progress
             best_a, best_s, best_f = s["best_answer"], s["best_score"], s.get("best_feedback", "")
-        return {**s, "score": score, "feedback": feedback,
-                "best_answer": best_a, "best_score": best_s, "best_feedback": best_f}
+            stall = s.get("stall", 0) + 1
+        return {**s, "score": score, "feedback": feedback, "best_answer": best_a,
+                "best_score": best_s, "best_feedback": best_f, "stall": stall}
 
     def refine(s: State) -> State:
         nxt = s["iterations"] + 1
@@ -275,14 +281,25 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         # paying full LLM calls to do it. First refine is unchanged (best == latest == rev0).
         base_answer = s.get("best_answer") or s["answer"]
         base_feedback = s.get("best_feedback") or s["feedback"]
-        answer = llm.complete(fill(_prompt(use_case, "refine.md"),
-                                   task=s["task"], answer=base_answer, data=s.get("data", ""),
-                                   feedback=base_feedback, skills=skills, revision=nxt))
+        try:
+            answer = llm.complete(fill(_prompt(use_case, "refine.md"),
+                                       task=s["task"], answer=base_answer, data=s.get("data", ""),
+                                       feedback=base_feedback, skills=skills, revision=nxt))
+        except (RuntimeError, EmptyResponseError) as e:
+            # A failed REFINEMENT is non-fatal: we already have a scored best_answer, so keep it and
+            # end the loop instead of throwing away good work with a 500 (Bug 1). (A failure on the
+            # FIRST generate has nothing to fall back to, so generate stays unguarded -> fatal.)
+            log(f"  [refine]   rev{nxt} worker failed: {e}; keeping best so far")
+            return {**s, "iterations": max_iters}       # forces keep_going -> stop; best_* preserved
         log(f"  [refine]   rev{nxt} -> {answer}")
         return {**s, "answer": answer, "iterations": nxt}
 
     def keep_going(s: State) -> str:
-        return "stop" if (s["score"] >= pass_score or s["iterations"] >= max_iters) else "refine"
+        if s["score"] >= pass_score or s["iterations"] >= max_iters:
+            return "stop"
+        if max_stall and s.get("stall", 0) >= max_stall:   # refines aren't beating best -> stop (Bug 3)
+            return "stop"
+        return "refine"
 
     # Observability is applied here, from OUTSIDE the nodes: instrument() wraps each node
     # to emit a timed event (or returns it unchanged when TRACER=none -> zero overhead).
@@ -300,4 +317,4 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
 def initial_state(task: str) -> State:
     return {"task": task, "data": "", "answer": "", "feedback": "",
             "score": -1, "best_answer": "", "best_score": -1, "best_feedback": "",
-            "iterations": 0, "run_id": uuid.uuid4().hex[:12]}
+            "stall": 0, "iterations": 0, "run_id": uuid.uuid4().hex[:12]}

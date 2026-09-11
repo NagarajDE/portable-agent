@@ -260,7 +260,10 @@ deletion-by-request is a plain `DELETE`.
   `CORTEX_SEMANTIC_MODEL` (a stage YAML); view wins if both set. `CortexClient` uses the STRUCTURED
   COMPLETE form (messages+options) to get `usage`, so it detects truncation via
   `completion_tokens >= max_tokens` (Cortex exposes no `finish_reason`), falling back to the plain
-  string form if that call fails — never a regression. Verified: imports stay lazy (mock path untouched),
+  string form if that call fails — never a regression. `snowpark_session()` is **memoized** — ONE
+  session serves worker + judge + Analyst tool (+ Snowflake memory), not 3-4 logins; it runs
+  statements serially, so it's single-flight per process (fine at low concurrency; pool per-thread
+  for high concurrency). Verified: imports stay lazy (mock path untouched),
   row formatter + auth-error paths unit-tested; the live call is untested here (no account).
 - **Databricks/Genie are STILL STUBBED**: `DatabricksClient` / `GenieTool` have the SDK
   shape + a `TODO`. Wire like Cortex, and test with `SQL_TOOL=mock` first to isolate the
@@ -349,6 +352,13 @@ in sync with `git status`.
 - **Refine builds from the BEST answer, not the latest** (`refine` uses `best_answer` +
   `best_feedback`, not `answer`/`feedback`). Otherwise a degraded revision becomes the base and
   the loop walks downhill while paying full LLM calls. Don't "simplify" refine back to `s["answer"]`.
+- **A failed refinement is NON-FATAL; a failed first generate IS fatal.** `refine` catches
+  `RuntimeError`/`EmptyResponseError` from the worker (e.g. truncation) and ends the loop keeping
+  the already-scored `best_answer` — a mid-loop worker error must not 500 away good work. `generate`
+  stays unguarded (nothing to fall back to on the first draft). Don't guard `generate`.
+- **No-progress stop:** `max_stall` (default 2) ends the loop after that many refines that don't
+  beat `best_score` — guards the deterministic refine-from-best case (same base+critique → same
+  answer → grind to `max_iters`). `0` disables it.
 - **Scoring knobs are separate:** `max_score` (validation cap, default 18) vs `pass_score`
   (stop threshold, must be ≥1; `threshold` is the backward-compatible alias, **default 15** in
   `shared/config.yaml`). Keep it BELOW `max_score`: `pass_score == max_score` means only a perfect
