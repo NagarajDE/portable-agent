@@ -1,0 +1,33 @@
+inherits: [shared]
+name: "API assistant (generic, non-SQL example)"
+sample_task: "Is the orders service healthy, and who owns it?"
+
+# Demonstrates the GENERIC tool layer with TWO read-only tools, run deterministically with
+# NO credentials and NO network:
+#   catalog -> a mock service-catalog lookup (in-process canned data)
+#   health  -> the GENERIC http tool in MOCK mode (canned body). Flip to mode: http + a real
+#              allowlist + token_env to make real GETs (secret comes from env only; see .env.example).
+# This pack declares `tools:`, so the engine runs these read-only tools up front and feeds their
+# observations into `generate` -- it never touches the SQL path. SQL is just one tool type.
+tools:
+  - type: mock
+    name: catalog
+    input: { query: "${task}" }
+    params:
+      description: "Internal service catalog (owner + tier lookup)."
+      output: |
+        SERVICE     | OWNER            | TIER
+        orders-api  | team-fulfillment | 1
+        billing-api | team-payments    | 1
+        search-api  | team-discovery   | 2
+  - type: http
+    name: health
+    input: { path: "/health/orders-api" }
+    params:
+      description: "Service health endpoint (HTTP GET)."
+      mode: mock
+      base_url: "https://api.internal.example.com"
+      allow_hosts: ["api.internal.example.com"]
+      token_env: API_ASSISTANT_TOKEN          # NAME of an env var; the token VALUE is never stored here
+      mock_responses:
+        "/health/orders-api": '{"service": "orders-api", "status": "healthy", "uptime_pct": 99.98, "open_incidents": 0}'

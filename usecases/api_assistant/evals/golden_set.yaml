@@ -1,0 +1,6 @@
+# Golden set for the generic API assistant. Uses the domain-neutral `input:` key (run_evals
+# accepts `input` OR `question`). On the MOCK worker the answer is the canned fixtures text, so
+# this exercises the HARNESS; real signal comes from a real WORKER_PROVIDER.
+# expect_contains: substrings the best_answer must include (case-insensitive).
+- input: "Is the orders service healthy, and who owns it?"
+  expect_contains: ["orders-api", "team-fulfillment", "healthy"]

@@ -32,6 +32,8 @@ engine/     GENERIC. shared code. touch rarely.
   graph.py             the loop: generate→evaluate→refine, composes shared+pack
   llm_client.py         LLMClient interface + mock|anthropic|cortex|databricks
   sql_tool.py           SQLTool  interface + mock|cortex-analyst|genie
+  tools/                generic Tool layer: base(contracts)+registry+dispatch+orchestrator
+                        + adapters sql_bridge|mock|http  (SQL = one tool category)
   tracing.py            Tracer      interface + stdout|otel|mlflow|eventtable|none
   memory.py             MemoryStore interface + none|mock|sqlite|snowflake (episodic+feedback)
   platform_databricks/agent.py   the ONLY Databricks-specific file (~25 lines)
@@ -80,6 +82,7 @@ usecases/my_new_agent/
 | `kpi_analytics` | what does the metric say? | metric-definition correctness · time grain & framing · clarity |
 | `anomaly_rca` | why did it change? | hypothesis quality · evidence & isolation · actionable conclusion |
 | `parity_hana_snowflake` | cross-engine parity | overrides the shared rubric (demonstrates override, not inherit) |
+| `api_assistant` | generic **non-SQL** example | demonstrates the tool layer: a mock catalog + the generic http tool (mock mode); no creds, no network |
 
 ## Hard-won decisions from design discussion (don't re-derive these)
 
@@ -374,6 +377,16 @@ in sync with `git status`.
 - **Model-generated SQL is treated as untrusted:** `CortexAnalystTool` runs it only through
   `_ensure_read_only()` (single statement, SELECT/WITH only) with a `SQL_TIMEOUT_SECONDS` cap —
   a backstop; the PRIMARY control is granting the service role SELECT-only (see the deploy guide).
+- **Generic tool layer (`engine/tools/`): SQL is ONE tool category, not the engine's assumption.**
+  Packs declare tools in `config.yaml` (`tools:`); a pack with NO `tools:` key takes the identical
+  legacy `get_sql_tool().ask()` path — never regress that. Tool execution is **deterministic**
+  (the engine runs read-only tools up front and feeds observations into `generate`; the LLM does
+  NOT select tools — so tool output can't trigger a tool call). ReAct is deferred behind the same
+  `dispatch()`. Invariants: every call goes through `dispatch()` (validate → approval gate →
+  timeout → normalized `ToolResult` → bounded output → one redacted log line); **config cannot
+  upgrade a tool's `read_only`** (capability lives in the adapter's `ToolSpec`); side-effecting
+  tools run only with `ctx.approved`; keep any vendor SDK import lazy (inside `run`), per the core
+  principle. See [`docs/concepts/tools-and-agents.md`](docs/concepts/tools-and-agents.md).
 - Keep observability OUT of the loop. `graph.py` nodes are pure; all tracing lives in
   `engine/tracing.py` and is applied via `instrument(...)` (node wrapper) + `traced_invoke`
   (run wrapper). Don't add `tracer.event(...)`, timing, or vendor observability SDKs

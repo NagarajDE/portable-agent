@@ -24,11 +24,12 @@ def run(use_case: str):
     print(f"\nEVAL: {use_case}   ({len(golden)} cases)")
     print("=" * 68)
     for case in golden:
-        answer = traced_invoke(app, initial_state(case["question"]), use_case)["best_answer"]
+        prompt = case.get("input") or case["question"]   # domain-neutral: accept `input` OR `question`
+        answer = traced_invoke(app, initial_state(prompt), use_case)["best_answer"]
         missing = [s for s in case["expect_contains"] if s.lower() not in answer.lower()]
         ok = not missing
         passed += ok
-        print(f"[{'PASS' if ok else 'FAIL'}] {case['question']}")
+        print(f"[{'PASS' if ok else 'FAIL'}] {prompt}")
         if missing:
             print(f"        missing: {missing}")
     print("=" * 68)

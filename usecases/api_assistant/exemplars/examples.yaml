@@ -1,0 +1,6 @@
+# Domain-neutral few-shot exemplars (input -> output). No SQL -- demonstrates the generic
+# exemplar format that coexists with the legacy verified question->SQL format.
+- input: "Who owns the billing service?"
+  output: "billing-api is owned by team-payments (tier 1)."
+- input: "Is search-api healthy?"
+  output: "search-api (tier 2, owned by team-discovery) — check its health endpoint for current status and open incidents."

@@ -16,6 +16,9 @@ Host on Databricks with one shell file.
 > Access control — who can call an agent, what it can read, and the per-user RLS end goal:
 > [`docs/concepts/access-control.md`](docs/concepts/access-control.md).
 >
+> Tools and agents — the generic tool layer (SQL is one tool of many), its safety model, and
+> how to add a tool-using pack: [`docs/concepts/tools-and-agents.md`](docs/concepts/tools-and-agents.md).
+>
 > Run locally on Windows against real Snowflake Cortex (or Databricks):
 > [`docs/run-locally-windows.md`](docs/run-locally-windows.md).
 

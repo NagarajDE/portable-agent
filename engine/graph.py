@@ -23,6 +23,7 @@ from engine.llm_client import (get_llm_client, get_eval_client, model_summary,
                                 LLMClient, EmptyResponseError)
 from engine.sql_tool import get_sql_tool, SQLTool
 from engine.tracing import instrument       # observability is applied from OUTSIDE the nodes
+from engine.tools import load_tools, gather_context, describe_tools   # generic tool layer (SQL = one tool)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 USECASES = REPO_ROOT / "usecases"
@@ -63,8 +64,20 @@ def load_skills(use_case: str) -> str:
     return "\n\n".join(f.read_text().strip() for f in files) if files else "None."
 
 
+def _format_exemplar(p: dict) -> str:
+    """Render ONE exemplar. A legacy verified question->SQL pair ({question, sql}) renders
+    EXACTLY as before (Q:/SQL:); a domain-neutral pair ({input|question, output|answer})
+    renders as Input:/Output:. Both shapes may coexist in a pack."""
+    if "sql" in p:                                     # legacy verified Q->SQL (unchanged)
+        return f"Q: {p['question']}\nSQL: {p['sql']}"
+    prompt = p.get("input", p.get("question", ""))     # domain-neutral input->output
+    output = p.get("output", p.get("answer", ""))
+    return f"Input: {prompt}\nOutput: {output}"
+
+
 def load_exemplars(use_case: str) -> str:
-    """Verified question -> SQL pairs (pack-specific), injected as few-shot."""
+    """Pack-specific few-shot exemplars, injected into generate. Supports the legacy verified
+    question->SQL format AND a domain-neutral input->output format (see _format_exemplar)."""
     d = USECASES / use_case / "exemplars"
     pairs = []
     if d.exists():
@@ -72,7 +85,7 @@ def load_exemplars(use_case: str) -> str:
             pairs += yaml.safe_load(f.read_text()) or []
     if not pairs:
         return "None."
-    return "\n\n".join(f"Q: {p['question']}\nSQL: {p['sql']}" for p in pairs)
+    return "\n\n".join(_format_exemplar(p) for p in pairs)
 
 
 def fill(template: str, **kw) -> str:
@@ -219,7 +232,13 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     # judge: injected eval wins; else reuse an injected worker (so a real worker isn't paired
     # with a mock judge); else resolve independently from env.
     eval_llm = eval_llm or injected_llm or get_eval_client(use_case)
-    sql = sql or get_sql_tool(use_case, cfg.get("default_sql_tool", "mock"))
+    # Generic tool layer. A pack MAY declare `tools:` (one or more named tools); load_tools
+    # builds them. A legacy pack declares none -> load_tools returns [] and we take the
+    # IDENTICAL single-SQL path below, so existing packs' runtime behavior is unchanged.
+    loaded_tools = load_tools(use_case, cfg)
+    if not loaded_tools:
+        sql = sql or get_sql_tool(use_case, cfg.get("default_sql_tool", "mock"))
+    tools_desc = describe_tools(loaded_tools)          # {tools} block for the persona ("None." if legacy)
     skills = load_skills(use_case)
     exemplars = load_exemplars(use_case)
 
@@ -230,10 +249,17 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     log(f"  [models]   {model_summary()}")
 
     def generate(s: State) -> State:
-        data = sql.ask(s["task"])
+        # Context source is DETERMINISTIC: a tools pack runs its declared READ-ONLY tools and
+        # feeds their observations in; a legacy pack makes the single SQL call, exactly as before.
+        # (The model never SELECTS a tool -> tool output can't trigger a tool call: injection-safe.)
+        if loaded_tools:
+            data = gather_context(s["task"], loaded_tools, s.get("run_id", "-"))
+        else:
+            data = sql.ask(s["task"])
         answer = llm.complete(fill(_prompt(use_case, "generate.md"),
-                                   task=s["task"], data=data,
-                                   skills=skills, exemplars=exemplars, revision=0))
+                                   task=s["task"], data=data, observations=data,
+                                   tools=tools_desc, skills=skills,
+                                   exemplars=exemplars, revision=0))
         log(f"  [generate] rev0 -> {answer}")
         return {**s, "data": data, "answer": answer, "iterations": 0}
 
@@ -242,6 +268,7 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         # fabricated number can't satisfy the rubric (the judge can check against evidence).
         base = fill(_prompt(use_case, "rubric.md"),
                     task=s["task"], answer=s["answer"], data=s.get("data", ""),
+                    observations=s.get("data", ""),    # {observations} = domain-neutral alias for {data}
                     max_score=max_score)               # rubric's denominator matches the configured scale
         verdict: Verdict | None = None
         for attempt in range(eval_retries + 1):
@@ -284,6 +311,7 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         try:
             answer = llm.complete(fill(_prompt(use_case, "refine.md"),
                                        task=s["task"], answer=base_answer, data=s.get("data", ""),
+                                       observations=s.get("data", ""),   # domain-neutral alias
                                        feedback=base_feedback, skills=skills, revision=nxt))
         except (RuntimeError, EmptyResponseError) as e:
             # A failed REFINEMENT is non-fatal: we already have a scored best_answer, so keep it and
