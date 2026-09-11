@@ -20,9 +20,11 @@ the network-safety contract:
                       redacts) and never placed in the URL.
   * NO AMBIENT     -- a private session with trust_env=False: no env proxies, no .netrc; URL
                       userinfo (user:pass@host) is rejected.
-  * BOUNDED        -- response size cap, per-call timeout AND a wall-clock deadline across all
-                      redirects/retries, bounded retries with backoff, optional rate limit; the
-                      response is always closed.
+  * BOUNDED        -- response size cap; a wall-clock deadline governs the retry/redirect loop and is
+                      re-checked between body chunks; bounded retries with backoff; optional rate limit;
+                      the response is always closed. (DNS resolution, the optional rate-limit sleep, and
+                      a single blocking chunk read sit OUTSIDE the deadline -- the dispatch future
+                      timeout is the hard caller-side bound.)
   * UNTRUSTED      -- the body is returned as plain text evidence; it is never executed and
                       (by the deterministic loop) can never trigger a tool call.
 
@@ -36,7 +38,7 @@ import os
 import socket
 import threading
 import time
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from pydantic import BaseModel, ConfigDict
 
@@ -170,7 +172,7 @@ class HttpGetTool:
         pu = urlsplit(path)
         if pu.scheme or pu.netloc:                     # path must be RELATIVE (no scheme/host) (M12)
             raise ValueError("path must be relative (no scheme or host)")
-        if ".." in pu.path.split("/"):                 # check the PATH COMPONENT only, so '..?x=1' can't slip by (M12)
+        if ".." in unquote(pu.path).split("/"):        # percent-DECODE first, so %2e%2e is caught too (M12/NB2)
             raise ValueError("path must not contain '..' segments")
         if self._mode == "mock":                       # creds-free deterministic path
             body = self._mock.get(path, self._mock_default)
@@ -198,16 +200,18 @@ class HttpGetTool:
         return headers
 
     def _read_body(self, resp, deadline, requests) -> bytes:
-        """Read the body in bounded chunks, checking the wall-clock deadline between chunks so a
-        slow-drip response can't run indefinitely past ctx.timeout_s (M14). Capped at max_bytes+1
-        (the extra byte lets bound_output detect truncation). `raw` is accessed once (it's stateful)."""
+        """Read the body in small bounded chunks, checking the wall-clock deadline BETWEEN chunks so
+        a slow response is cut off promptly (M14). Capped at max_bytes+1 (the extra byte lets
+        bound_output detect truncation). `raw` is accessed once (it's stateful). Residual: a single
+        blocking chunk read can still run up to the socket read-timeout; the dispatch future timeout
+        is the hard CALLER-side bound (it returns control at ctx.timeout_s regardless)."""
         raw = resp.raw
         limit = self._max_bytes + 1
         buf = bytearray()
         while len(buf) < limit:
             if time.monotonic() > deadline:
                 raise requests.Timeout("wall-clock deadline exceeded during body read")
-            chunk = raw.read(min(65536, limit - len(buf)), decode_content=True)
+            chunk = raw.read(min(8192, limit - len(buf)), decode_content=True)   # small chunk -> frequent checks
             if not chunk:
                 break
             buf += chunk

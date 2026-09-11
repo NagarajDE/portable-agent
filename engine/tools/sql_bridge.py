@@ -50,15 +50,22 @@ class SqlBridgeTool:
 
     @staticmethod
     def _accepts_timeout(ask) -> bool:
-        """True if the adapter's ask() declares a `timeout_s` param (or **kwargs). Lets us forward
-        ctx.timeout_s to adapters that support it WITHOUT changing the SQLTool.ask(question) contract
-        or breaking adapters that don't (H2) -- the transport timeout is then enforced adapter-side,
-        which the caller-side future.cancel() cannot do for an already-running query."""
+        """True if the adapter's ask() can receive `timeout_s` BY KEYWORD (a normal/keyword-only
+        param) or via **kwargs. A POSITIONAL-ONLY `timeout_s` is deliberately NOT counted (NB1):
+        we call ask(question, timeout_s=...), so claiming support for a positional-only param would
+        raise TypeError. Lets us forward ctx.timeout_s to adapters that support it WITHOUT changing
+        the SQLTool.ask(question) contract or breaking adapters that don't (H2) -- the transport
+        timeout is then enforced adapter-side, which caller-side future.cancel() cannot do."""
         try:
             params = inspect.signature(ask).parameters.values()
         except (TypeError, ValueError):
             return False
-        return any(p.name == "timeout_s" or p.kind == p.VAR_KEYWORD for p in params)
+        for p in params:
+            if p.kind == p.VAR_KEYWORD:                                    # **kwargs -> accepts it
+                return True
+            if p.name == "timeout_s" and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY):
+                return True
+        return False
 
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
         tool = self._tool()

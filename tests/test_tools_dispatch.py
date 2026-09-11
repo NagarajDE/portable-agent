@@ -290,3 +290,20 @@ def test_returned_error_is_size_bounded():
     from engine.tools.base import DEFAULT_MAX_ERROR_CHARS
     r = dispatch(build_tool("mock", {"fail": "x" * 5000}), {}, _ctx())   # huge exception message
     assert not r.ok and len(r.error.message) <= DEFAULT_MAX_ERROR_CHARS + 20
+
+
+def test_accepts_timeout_only_when_keyword_passable():
+    # NB1: timeout_s is forwarded as a KEYWORD (ask(question, timeout_s=...)), so a positional-only
+    # timeout_s must NOT count as supported -- else the forward would raise TypeError.
+    from engine.tools.sql_bridge import SqlBridgeTool
+    A = SqlBridgeTool._accepts_timeout
+
+    def ask_kw(self, q, timeout_s=1.0): ...
+    def ask_kwonly(self, q, *, timeout_s=1.0): ...
+    def ask_kwargs(self, q, **kw): ...
+    def ask_plain(self, q): ...
+    def ask_posonly(self, q, timeout_s=1.0, /): ...
+
+    assert A(ask_kw) is True and A(ask_kwonly) is True and A(ask_kwargs) is True
+    assert A(ask_plain) is False
+    assert A(ask_posonly) is False       # positional-only can't be passed by keyword

@@ -7,6 +7,10 @@ Host on Databricks with one shell file.
 
 > New to the terminology? Plain-language definitions are in [`GLOSSARY.md`](GLOSSARY.md).
 >
+> **Start here — the whole-system map:** which artifact (skills, prompts, rubric, refine, exemplars,
+> evals) is used and *when*, and how the runtime path differs from the test-time path:
+> [`docs/concepts/end-to-end-flow.md`](docs/concepts/end-to-end-flow.md).
+>
 > How the agent improves without retraining (evals vs. exemplars, the learning flywheel):
 > [`docs/concepts/evals-and-the-learning-flywheel.md`](docs/concepts/evals-and-the-learning-flywheel.md).
 >

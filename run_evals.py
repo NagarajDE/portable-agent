@@ -18,7 +18,7 @@ from engine.graph import build_graph, initial_state, USECASES
 from engine.tracing import traced_invoke
 
 def run(use_case: str):
-    golden = yaml.safe_load((USECASES / use_case / "evals" / "golden_set.yaml").read_text())
+    golden = yaml.safe_load((USECASES / use_case / "evals" / "golden_set.yaml").read_text(encoding="utf-8"))
     app = build_graph(use_case, verbose=False)          # quiet loop for clean report
     passed = 0
     print(f"\nEVAL: {use_case}   ({len(golden)} cases)")

@@ -152,8 +152,10 @@ The `http` tool is the reference implementation of the network-safety contract:
   origin, never over an http downgrade, never written in a pack, never logged.
 - **No ambient auth** — a private `trust_env=False` session (no env proxies / `.netrc`); URL
   userinfo is rejected; `path` must be **relative** (no absolute URL, no `..` escape).
-- **Bounded** — response size cap, per-call timeout *and* a wall-clock deadline across all
-  redirects/retries, bounded retries with backoff, optional rate limit; the response is always closed.
+- **Bounded** — response size cap; a wall-clock deadline governs the retry/redirect loop and is
+  re-checked between body chunks; bounded retries with backoff; optional rate limit; the response is
+  always closed. DNS resolution, the rate-limit sleep, and a single blocking chunk read sit *outside*
+  the deadline — the `dispatch()` `future.result(timeout)` is the hard caller-side bound.
 - **Untrusted output** — the body is returned as plain text evidence, never executed.
 - **Capability** — a GET is `read_only=True` by default; a pack can set `read_only: false` for a
   known-mutating endpoint so the approval gate applies.

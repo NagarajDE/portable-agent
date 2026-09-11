@@ -392,9 +392,11 @@ in sync with `git status`.
   e.g. a mutating GET); side-effecting tools run only when `ctx.approved is True` (strict); keep any
   vendor SDK import lazy (inside `run`). The `http` tool binds its bearer token to the ORIGINAL https
   origin (never forwarded across a redirect or over an http downgrade), uses a `trust_env=False`
-  session, re-validates host+SSRF before every connect, and enforces a wall-clock deadline (bounding
-  the chunked body read too). Residual (accepted): the resolved IP is not pinned to the socket, so
-  the **allowlist is the primary control** against DNS rebinding. See
+  session, re-validates host+SSRF before every connect, and applies a wall-clock deadline over the
+  retry/redirect loop (re-checked between body chunks). Residuals (accepted): the resolved IP is not
+  pinned to the socket (the **allowlist is the primary control** against DNS rebinding), and DNS, the
+  rate-limit sleep, and a single blocking read sit outside the deadline — the dispatch
+  `future.result(timeout)` is the hard caller-side bound. See
   [`docs/concepts/tools-and-agents.md`](docs/concepts/tools-and-agents.md).
 - Keep observability OUT of the loop. `graph.py` nodes are pure; all tracing lives in
   `engine/tracing.py` and is applied via `instrument(...)` (node wrapper) + `traced_invoke`

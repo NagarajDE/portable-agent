@@ -32,7 +32,7 @@ SHARED = REPO_ROOT / "shared"
 
 def load_config(use_case: str) -> dict:
     """Merge inherited bases (e.g. shared) then the pack's own config (pack wins)."""
-    pack = yaml.safe_load((USECASES / use_case / "config.yaml").read_text()) or {}
+    pack = yaml.safe_load((USECASES / use_case / "config.yaml").read_text(encoding="utf-8")) or {}
     inherits = pack.get("inherits", [])
     if isinstance(inherits, str):                      # `inherits: shared` -> ["shared"], not chars
         inherits = [inherits]
@@ -40,7 +40,7 @@ def load_config(use_case: str) -> dict:
     for base in inherits:
         base_cfg = (SHARED if base == "shared" else REPO_ROOT / base) / "config.yaml"
         if base_cfg.exists():
-            merged.update(yaml.safe_load(base_cfg.read_text()) or {})
+            merged.update(yaml.safe_load(base_cfg.read_text(encoding="utf-8")) or {})
     merged.update(pack)
     merged.pop("inherits", None)
     return merged
@@ -51,7 +51,7 @@ def _prompt(use_case: str, name: str) -> str:
     for base in (USECASES / use_case / "prompts", SHARED / "prompts"):
         f = base / name
         if f.exists():
-            return f.read_text()
+            return f.read_text(encoding="utf-8")     # explicit UTF-8: don't let a non-UTF-8 OS locale (e.g. Windows cp1252) mangle non-ASCII artifact text
     raise FileNotFoundError(f"{name} not found in pack or shared")
 
 
@@ -61,7 +61,7 @@ def load_skills(use_case: str) -> str:
     for base in (SHARED / "skills", USECASES / use_case / "skills"):
         if base.exists():
             files += sorted(base.glob("*.md"))
-    return "\n\n".join(f.read_text().strip() for f in files) if files else "None."
+    return "\n\n".join(f.read_text(encoding="utf-8").strip() for f in files) if files else "None."
 
 
 def _format_exemplar(p: dict) -> str:
@@ -82,7 +82,7 @@ def load_exemplars(use_case: str) -> str:
     pairs = []
     if d.exists():
         for f in sorted(d.glob("*.yaml")):
-            pairs += yaml.safe_load(f.read_text()) or []
+            pairs += yaml.safe_load(f.read_text(encoding="utf-8")) or []
     if not pairs:
         return "None."
     return "\n\n".join(_format_exemplar(p) for p in pairs)

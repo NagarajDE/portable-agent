@@ -272,6 +272,15 @@ def test_path_dotdot_with_query_rejected(fake_requests):
     assert not r.ok and "segment" in r.error.message
 
 
+def test_path_encoded_dotdot_rejected(fake_requests):
+    # NB2: percent-encoded traversal (%2e%2e) must be decoded and rejected before it reaches the wire
+    fake_requests(_Resp(200, body=b"x"))
+    tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
+                               "allow_hosts": ["example.com"]})
+    r = dispatch(tool, {"path": "%2e%2e/admin"}, _ctx())
+    assert not r.ok and "segment" in r.error.message
+
+
 def test_validate_url_rejects_any_userinfo():
     # L1: empty userinfo (`@host`) is falsy but must still be rejected
     for u in ("https://user:pw@api.example.com/x", "https://@api.example.com/x",

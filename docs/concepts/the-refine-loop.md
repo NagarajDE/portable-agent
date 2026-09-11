@@ -113,7 +113,79 @@ to yet.
 
 ---
 
-## 3. The two scoring knobs: `max_score` vs `pass_score`
+## 3. The prompts behind each step — and how the `{placeholders}` fill
+
+Each box in the loop is driven by a **prompt template** — a `.md` file with `{placeholders}` in it.
+You author the template once; **the engine fills the `{...}` slots at runtime**. There is nothing to
+"enter" by hand: `{revision}`, `{task}`, `{data}` and the rest are substituted on every call from the
+live run state.
+
+| step | template | model that runs it | what it produces |
+|---|---|---|---|
+| GENERATE | `prompts/generate.md` | worker (`llm`) | the first answer (rev0) |
+| EVALUATE | `prompts/rubric.md` | judge (`eval_llm`) | a score + a critique |
+| REFINE | `prompts/refine.md` | worker (`llm`) | an improved answer |
+
+### The placeholders, and where each value comes from
+
+All substitution happens in `fill()` ([`engine/graph.py`](../../engine/graph.py)). It runs in a
+**single pass** and is **brace-safe**: any `{name}` the engine doesn't supply (or a literal `{` in a
+SQL/JSON example) is left untouched — an unknown placeholder is a harmless no-op, never an error.
+
+| placeholder | the engine fills it with | appears in |
+|---|---|---|
+| `{task}` | the user's question | generate, rubric, refine |
+| `{data}` / `{observations}` | evidence from the tools/SQL step (`{observations}` is a domain-neutral alias for the same string) | generate, rubric, refine |
+| `{skills}` | shared + pack skill files, concatenated | generate, refine |
+| `{exemplars}` | the pack's few-shot examples | generate |
+| `{tools}` | a description of the pack's tools (`"None."` for a SQL/legacy pack) | generate |
+| `{answer}` | in **rubric**: the candidate being graded; in **refine**: the best answer so far | rubric, refine |
+| `{feedback}` | the judge's critique of that best answer | refine |
+| `{revision}` | the revision number (0, 1, 2 …) | generate (0), refine (n) |
+| `{max_score}` | the rubric scale from config (e.g. 18) | rubric |
+
+> So `{revision}` in `refine.md` is **filled by the engine** with the current round number — it is not
+> something you set. The same is true of every other `{...}`. You edit the *wording* around the
+> placeholders; the engine supplies the *values*.
+
+### "Small token cost" — what that meant
+
+When `{skills}` was added to `refine.md`, every **refine** call now also carries the skills text. That
+is a **recurring** per-refine cost (skills are re-sent on each rewrite), **not** a one-time charge — but
+it is small because skill files are short, and it is **zero when a run passes on rev0** (no refine runs
+at all — exactly what happened in the live inventory run, `iterations: 0`). A hard question that refines
+three times sends the skills three times. The upside: every rewrite keeps following the house/domain
+rules instead of drifting away from them after the first draft.
+
+## Refine vs. the rubric — two different jobs
+
+These are easy to conflate because they sit next to each other in the loop, but they play opposite roles:
+
+| | **rubric.md** (EVALUATE) | **refine.md** (REFINE) |
+|---|---|---|
+| Role | **grades** the answer | **rewrites** the answer |
+| Run by | the **judge** (`eval_llm`) | the **worker** (`llm`) |
+| Output | `SCORE: N/max - reason` | a better answer |
+| Runs | **every** question, mid-loop | **only** when the score is below `pass_score` and iterations remain |
+| Reads | the candidate answer + the evidence | the *best* answer + the judge's *feedback* + skills + evidence |
+
+The link between them: the judge's `reason` becomes refine's `{feedback}`. **The rubric says what's
+wrong; refine fixes it.** One is the examiner, the other is the student revising to the examiner's notes.
+
+### Shared vs. per-pack (the "override")
+
+Prompts resolve **pack-first, then shared** (`_prompt()` in `engine/graph.py`): if
+`usecases/<pack>/prompts/refine.md` exists it is used; otherwise `shared/prompts/refine.md`. Today
+**no pack overrides `refine.md`**, so every pack uses the shared one — which is why editing
+`shared/prompts/refine.md` changes the refine step for all packs uniformly. If one pack ever needs a
+different revision style, drop a `refine.md` into that pack's `prompts/` and it overrides shared **for
+that pack only** — the same mechanism used for `rubric.md` (e.g. `dq_qals` and `inventory_balance` ship
+their own `rubric.md`; the rest inherit shared). `generate.md` is always pack-owned — there is no shared
+default for it.
+
+---
+
+## 4. The two scoring knobs: `max_score` vs `pass_score`
 
 These are often confused. They are different things.
 
@@ -150,6 +222,8 @@ Either condition ends the loop; you always get back the **best** answer seen, wi
 ---
 
 ## See also
+- [`end-to-end-flow.md`](end-to-end-flow.md) — the whole-system map: which artifact is used, and when
+  (runtime vs. test-time).
 - [`evals-and-the-learning-flywheel.md`](evals-and-the-learning-flywheel.md) — how the judge's score
   differs from the offline golden-set evals.
 - [`CLAUDE.md`](../../CLAUDE.md) — the operational conventions for the loop.

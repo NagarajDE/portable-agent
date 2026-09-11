@@ -176,6 +176,8 @@ cases — the subtle phrasings, the domain gotchas, the questions users actually
 
 ## See also
 
+- [`end-to-end-flow.md`](end-to-end-flow.md) — where evals sit in the whole picture: the runtime path
+  vs. the test-time path, and the two things called "eval".
 - [`GLOSSARY.md`](../../GLOSSARY.md) — terms (exemplar, verified query, judge, verdict).
 - [`PROJECT_CONTEXT.md`](../../PROJECT_CONTEXT.md) — the decision log and the "own it or lose it" thesis.
 - [`CLAUDE.md`](../../CLAUDE.md) — operational spec; memory & observability modules.
