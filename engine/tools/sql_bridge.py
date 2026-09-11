@@ -9,13 +9,16 @@ only when the wrapped SQL tool is first built), so the mock path never needs the
 """
 from __future__ import annotations
 
-from pydantic import BaseModel
+import threading
+
+from pydantic import BaseModel, ConfigDict
 
 from engine.tools.base import ToolContext, ToolResult, ToolSpec
 from engine.tools.registry import register
 
 
 class _SqlInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")        # reject unknown args instead of dropping them (M3)
     question: str
 
 
@@ -34,11 +37,14 @@ class SqlBridgeTool:
         self._use_case = params.get("use_case")
         self._default = params.get("default_sql_tool", "mock")
         self._inner = None                           # built lazily -> vendor SDK import is lazy
+        self._lock = threading.Lock()                # guard lazy init against concurrent callers (M8)
 
     def _tool(self):
-        if self._inner is None:
-            from engine.sql_tool import get_sql_tool
-            self._inner = get_sql_tool(self._use_case, self._default)
+        if self._inner is None:                      # double-checked: cheap read, then lock once
+            with self._lock:
+                if self._inner is None:
+                    from engine.sql_tool import get_sql_tool
+                    self._inner = get_sql_tool(self._use_case, self._default)
         return self._inner
 
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:

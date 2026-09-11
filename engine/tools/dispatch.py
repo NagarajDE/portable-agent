@@ -29,7 +29,8 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutureTimeou
 
 from pydantic import ValidationError
 
-from engine.tools.base import ToolContext, ToolError, ToolResult, ToolSpec, Tool, bound_output, redact
+from engine.tools.base import (ToolContext, ToolError, ToolResult, Tool,
+                               bound_output, redact, clean_error)
 
 _log = logging.getLogger("portable_agent.tools")
 
@@ -52,7 +53,18 @@ _MAX_WORKERS = max(1, int(os.getenv("TOOL_MAX_CONCURRENCY", "4")))
 _EXECUTOR = ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="tool")
 
 
-def _validate(spec: ToolSpec, raw_input) -> dict:
+def _validation_summary(e: ValidationError) -> str:
+    """A value-FREE summary of a pydantic validation error: field location + message + type only.
+    NEVER echo the offending input (H4) -- pydantic's default str(e) embeds the input dict, which
+    can carry a secret that a caller passed as a bad argument."""
+    parts = []
+    for err in e.errors(include_url=False):
+        loc = ".".join(str(x) for x in err.get("loc", ())) or "(root)"
+        parts.append(f"{loc}: {err.get('msg', 'invalid')} [{err.get('type', '')}]")
+    return "; ".join(parts) or "input validation failed"
+
+
+def _validate(spec, raw_input) -> dict:
     if not isinstance(raw_input, dict):
         raise ToolValidationError(f"tool input must be an object, got {type(raw_input).__name__}")
     if spec.input_model is None:
@@ -60,28 +72,36 @@ def _validate(spec: ToolSpec, raw_input) -> dict:
     try:
         model = spec.input_model(**raw_input)
     except ValidationError as e:
-        raise ToolValidationError(str(e)) from None
+        raise ToolValidationError(_validation_summary(e)) from None
     return model.model_dump()
 
 
-def _emit(spec: ToolSpec, status: str, ms: int, ctx: ToolContext, detail: str = "") -> None:
-    rec = {"event": "tool", "tool": spec.name, "read_only": spec.read_only,
-           "status": status, "ms": ms, "run_id": ctx.run_id}
-    if detail:
-        rec["detail"] = redact(detail)[:300]         # redact + bound; never a raw payload/secret
+def _emit(spec, status: str, ms: int, ctx, detail: str = "") -> None:
+    """One structured, REDACTED log line per call. Fully defensive: a bad spec/ctx or a
+    serialization error must never break the call (this runs in dispatch's finally)."""
     try:
+        rec = {"event": "tool", "tool": getattr(spec, "name", "?"),
+               "read_only": getattr(spec, "read_only", None),
+               "status": status, "ms": ms, "run_id": getattr(ctx, "run_id", "-")}
+        if detail:
+            rec["detail"] = redact(detail)[:300]     # redact + bound; never a raw payload/secret
         _log.info(json.dumps(rec, default=str))
     except Exception:                                # observability must never break a call
         pass
 
 
 def dispatch(tool: Tool, raw_input: dict, ctx: ToolContext) -> ToolResult:
-    """Validate, gate, time-bound, run, normalize, log. Always returns a ToolResult."""
-    spec = tool.spec
+    """Validate, gate, time-bound, run, normalize, log. Always returns a ToolResult, never raises."""
     t0 = time.perf_counter()
-    status, detail, result = "ok", "", None
+    status, detail = "ok", ""
+    try:                                             # spec access is defensive (M4): a bad tool can't escape
+        spec = tool.spec
+    except Exception:
+        spec = None
     try:
-        if not spec.read_only and not ctx.approved:              # least-privilege / approval gate
+        if spec is None:
+            raise ToolValidationError("tool has no spec")
+        if not spec.read_only and ctx.approved is not True:      # STRICT: only literal True approves (M1)
             raise ApprovalRequiredError(
                 f"tool {spec.name!r} is side-effecting; explicit approval required")
         validated = _validate(spec, raw_input)
@@ -89,25 +109,34 @@ def dispatch(tool: Tool, raw_input: dict, ctx: ToolContext) -> ToolResult:
         try:
             out = future.result(timeout=max(0.1, float(ctx.timeout_s)))
         except _FutureTimeout:
-            raise ToolTimeoutError(f"tool {spec.name!r} exceeded {ctx.timeout_s}s") from None
+            future.cancel()                                      # drop it if still QUEUED (H1); a running
+            raise ToolTimeoutError(                              # thread can't be force-killed in Python
+                f"tool {spec.name!r} exceeded {ctx.timeout_s}s") from None
+        # Normalize to a ToolResult and ENFORCE the result invariants (M7):
         if not isinstance(out, ToolResult):                      # tolerate a bare string/None
             out = ToolResult(ok=out is not None, output="" if out is None else str(out))
-        result = ToolResult(ok=out.ok, output=bound_output(out.output),
-                            error=out.error, meta=out.meta)
-        if not result.ok and result.error:
-            status, detail = "error", f"{result.error.kind}: {result.error.message}"
+        ok = bool(out.ok) and out.error is None                  # ok=True WITH an error -> fail closed
+        err = out.error
+        if not ok and err is None:                               # ok=False WITHOUT an error -> synthesize
+            err = ToolError("runtime", "tool returned ok=False without an error")
+        if err is not None:
+            err = ToolError(err.kind, clean_error(err.message))  # redact + bound tool-supplied message (H3)
+        result = ToolResult(ok=ok, output=bound_output(out.output), error=err,
+                            meta=out.meta if isinstance(out.meta, dict) else {})
+        if not ok:
+            status, detail = "error", f"{err.kind}: {err.message}"
         return result
     except ToolValidationError as e:
         status, detail = "invalid", str(e)
-        return ToolResult(ok=False, error=ToolError("validation", str(e)))
+        return ToolResult(ok=False, error=ToolError("validation", clean_error(str(e))))
     except ApprovalRequiredError as e:
         status, detail = "blocked", str(e)
-        return ToolResult(ok=False, error=ToolError("approval_required", str(e)))
+        return ToolResult(ok=False, error=ToolError("approval_required", clean_error(str(e))))
     except ToolTimeoutError as e:
         status, detail = "timeout", str(e)
-        return ToolResult(ok=False, error=ToolError("timeout", str(e)))
+        return ToolResult(ok=False, error=ToolError("timeout", clean_error(str(e))))
     except Exception as e:                                        # any tool bug -> normalized, never raised
         status, detail = "error", f"{type(e).__name__}: {e}"
-        return ToolResult(ok=False, error=ToolError("runtime", f"{type(e).__name__}: {e}"))
+        return ToolResult(ok=False, error=ToolError("runtime", clean_error(f"{type(e).__name__}: {e}")))
     finally:
         _emit(spec, status, round((time.perf_counter() - t0) * 1000), ctx, detail)

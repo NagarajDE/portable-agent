@@ -38,18 +38,26 @@ def _ensure_builtins() -> None:
     from engine.tools import sql_bridge, mock_tool, http_tool  # noqa: F401
 
 
-def load_tools(use_case: str | None, cfg: dict) -> list[LoadedTool]:
-    """Build the pack's declared tools. Returns [] when the pack declares no `tools:` -- the
-    caller (graph) then takes the identical legacy SQL path, so existing packs are untouched."""
+def load_tools(use_case: str | None, cfg: dict) -> list[LoadedTool] | None:
+    """Build the pack's declared tools. Return semantics distinguish three cases (M6/M17):
+      * NO `tools:` key (or `tools:` null)  -> return None  -> caller takes the legacy SQL path
+        (existing packs are untouched).
+      * `tools: []`                          -> return []    -> a DELIBERATELY toolless agent
+        (no tools AND no SQL).
+      * `tools: [ ... ]`                     -> return the built tools.
+    A `tools:` value that is present but not a list (e.g. `{}`, `false`, a string) is a config
+    error and raises -- it is never silently coerced to empty."""
     _ensure_builtins()
-    entries = cfg.get("tools") or []
+    if "tools" not in cfg or cfg["tools"] is None:
+        return None                                   # legacy: no tools declared -> SQL path
+    entries = cfg["tools"]
     if not isinstance(entries, list):
-        raise ValueError("`tools:` must be a list of tool entries")
+        raise ValueError(f"`tools:` must be a list of tool entries, got {type(entries).__name__}")
     loaded: list[LoadedTool] = []
     for entry in entries:
         if not isinstance(entry, dict) or "type" not in entry:
             raise ValueError(f"each tool entry needs a `type`; got {entry!r}")
-        ttype = entry["type"]
+        ttype = str(entry["type"]).strip().lower()    # normalize (M5): 'SQL'/' sql ' -> 'sql'
         label = entry.get("name", ttype)
         params = dict(entry.get("params") or {})
         params.setdefault("tool_name", label)

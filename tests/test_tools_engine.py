@@ -90,7 +90,40 @@ def test_tools_pack_substitutes_task(monkeypatch):
     worker = _CapturingWorker("answer")
     g = build_graph("api_assistant", llm=worker, eval_llm=_Seq("SCORE: 18/18 - ok"), verbose=False)
     g.invoke(initial_state("UNIQUE-TOKEN-42"))
-    assert "UNIQUE-TOKEN-42" in worker.prompts[0]       # ${task} rendered into the tool input
+    gen = worker.prompts[0]
+    # L3: assert the token reached the TOOL OBSERVATION (the echoed input), not just the QUESTION line
+    assert "input={'query': 'UNIQUE-TOKEN-42'}" in gen
+
+
+def test_toolless_pack_uses_neither_tools_nor_sql(monkeypatch):
+    # M17: explicit `tools: []` is a deliberately toolless agent -> no tool output AND no SQL
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
+        "max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 0, "tools": []})
+    spy = _SpySql()
+    worker = _CapturingWorker("answer")
+    g = build_graph("api_assistant", llm=worker, sql=spy, eval_llm=_Seq("SCORE: 18/18 - ok"),
+                    verbose=False)
+    g.invoke(initial_state("q"))
+    assert spy.calls == []                                     # SQL path NOT taken
+    assert "No tool observations." in worker.prompts[0]        # and no tool output
+
+
+def test_tools_run_once_in_generate_not_per_refine(monkeypatch):
+    # L4: tools are gathered ONCE (in generate); refine must NOT re-run them
+    calls = {"n": 0}
+    real = _graph_mod.gather_context
+
+    def counting(task, loaded, run_id="-"):
+        calls["n"] += 1
+        return real(task, loaded, run_id)
+
+    monkeypatch.setattr(_graph_mod, "gather_context", counting)
+    monkeypatch.setattr(_graph_mod, "load_config", lambda uc: _tools_cfg(max_iters=2))
+    worker = _Seq("A0", "A1", "A2")
+    judge = _Seq("SCORE: 12/18 - low")                        # never passes -> refines to max_iters
+    g = build_graph("api_assistant", llm=worker, eval_llm=judge, verbose=False)
+    f = g.invoke(initial_state("q"))
+    assert f["iterations"] == 2 and calls["n"] == 1           # 2 refines happened, tools gathered once
 
 
 # --- CONTRACT: scoring/loop mechanics unchanged when tools are present ------
@@ -106,6 +139,8 @@ def test_scoring_unchanged_with_tools_present(monkeypatch):
 # --- JIRA-style pack: runs to completion on the mock provider, no creds -----
 def test_jira_style_pack_runs_with_mocks(monkeypatch):
     # A generic ticket-reader shape: a mock "tickets" tool + the http tool in mock mode.
+    monkeypatch.setenv("WORKER_PROVIDER", "mock")             # L2: pin the mock provider explicitly
+    monkeypatch.setenv("EVAL_PROVIDER", "mock")
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 18, "pass_score": 15, "max_iters": 4, "eval_retries": 0,
         "tools": [
@@ -128,7 +163,9 @@ def test_api_assistant_pack_config_loads_two_tools():
     assert all(lt.tool.spec.read_only for lt in loaded)
 
 
-def test_api_assistant_pack_runs_end_to_end():
+def test_api_assistant_pack_runs_end_to_end(monkeypatch):
+    monkeypatch.setenv("WORKER_PROVIDER", "mock")             # L2: pin the mock provider explicitly
+    monkeypatch.setenv("EVAL_PROVIDER", "mock")
     g = build_graph("api_assistant", verbose=False)     # mock provider by default (no creds)
     f = g.invoke(initial_state("Is the orders service healthy, and who owns it?"))
     assert f["best_score"] >= 15

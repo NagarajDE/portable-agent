@@ -18,17 +18,20 @@ from pydantic import BaseModel
 # Default caps -- overridable per tool/adapter. Output is bounded so a runaway tool can't
 # blow up prompt size / cost; treat all tool output as UNTRUSTED external data.
 DEFAULT_MAX_OUTPUT_CHARS = 20_000
+DEFAULT_MAX_ERROR_CHARS = 500          # returned error messages are bounded AND redacted (H3)
 
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """Tool identity + capability metadata. `read_only` is the SAFETY flag: only read-only
-    tools are auto-run by the orchestrator; side-effecting tools require explicit approval
-    (see dispatch). `input_model` (optional) is a pydantic model used to validate arguments
-    BEFORE the tool runs -- unknown/malformed args fail clearly instead of reaching the tool."""
+    """Tool identity + capability metadata. `read_only` is the SAFETY flag and is REQUIRED (no
+    default) so an adapter author must consciously declare capability -- a write tool that forgot
+    the flag can't silently be treated as safe (fail-closed at authoring). Only read-only tools
+    are auto-run by the orchestrator; side-effecting tools require explicit approval (see dispatch).
+    `input_model` (optional) is a pydantic model used to validate arguments BEFORE the tool runs
+    -- unknown/malformed args fail clearly instead of reaching the tool."""
     name: str
     description: str
-    read_only: bool = True
+    read_only: bool
     input_model: type[BaseModel] | None = None
 
 
@@ -80,20 +83,36 @@ def bound_output(text: str, max_chars: int = DEFAULT_MAX_OUTPUT_CHARS) -> str:
 
 
 # Redaction for LOG lines / error messages -- never let a credential land in observability.
-# Deliberately conservative: scrub bearer tokens, common secret key=value pairs, and JWTs.
+# Ordered (pattern, replacement) pairs. Covers bearer tokens, sensitive key/value pairs in the
+# common shapes (env `k=v`, log `k: v`, AND JSON/dict `"k": "v"` / `'k': 'v'` -- the quoted forms
+# that a naive `\bkey\b\s*[:=]` misses because the quote sits between key and separator), secrets
+# embedded in URL userinfo (scheme://user:pass@host, as leaked by some SDK error strings), and JWTs.
 _REDACT_PATTERNS = (
-    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+"),
-    re.compile(r"(?i)\b(authorization|token|password|passwd|pat|secret|api[_-]?key)\b(\s*[=:]\s*)\S+"),
-    re.compile(r"\beyJ[A-Za-z0-9._\-]{10,}"),          # JWT-ish
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)((?:authorization|token|password|passwd|pat|secret|api[_-]?key)"
+                r"[\"']?\s*[:=]\s*[\"']?)[^\s,;\"'}\])]+"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)([a-z][a-z0-9+.\-]*://)[^/@\s:]+:[^/@\s]+@"), r"\1[REDACTED]@"),
+    (re.compile(r"\beyJ[A-Za-z0-9._\-]{10,}"), "[REDACTED_JWT]"),          # JWT-ish
 )
 
 
 def redact(text: str) -> str:
-    """Scrub obvious secrets from a string before it is logged or surfaced in an error."""
+    """Scrub obvious secrets from a string before it is logged or surfaced in an error. Best-effort
+    defense-in-depth (the primary control is never putting secrets in packs/args); applied to every
+    dispatch log line AND every returned error message."""
     if not text:
         return text
     out = str(text)
-    out = _REDACT_PATTERNS[0].sub(r"\1[REDACTED]", out)
-    out = _REDACT_PATTERNS[1].sub(r"\1\2[REDACTED]", out)
-    out = _REDACT_PATTERNS[2].sub("[REDACTED_JWT]", out)
+    for pattern, repl in _REDACT_PATTERNS:
+        out = pattern.sub(repl, out)
     return out
+
+
+def clean_error(text: str, max_chars: int = DEFAULT_MAX_ERROR_CHARS) -> str:
+    """Redact secrets AND bound size for an error string that is RETURNED to a caller (not only
+    logged). Raw SDK/network exceptions can embed authenticated URLs, headers, or tokens and can be
+    arbitrarily large -- both are unsafe to hand back verbatim."""
+    red = redact("" if text is None else str(text))
+    if len(red) > max_chars:
+        return red[:max_chars] + "…(truncated)"
+    return red

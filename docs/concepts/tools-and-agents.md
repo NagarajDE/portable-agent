@@ -57,7 +57,7 @@ Small, typed, vendor-free — the interface everything else references:
 
 | type | what it is |
 |---|---|
-| `ToolSpec` | tool **identity + capability metadata**: `name`, `description`, `read_only`, optional pydantic `input_model` for argument validation |
+| `ToolSpec` | tool **identity + capability metadata**: `name`, `description`, `read_only` (**required** — fail-closed authoring), optional pydantic `input_model` for argument validation |
 | `ToolResult` | normalized result: `ok`, `output` (text evidence), `error`, `meta` |
 | `ToolError` | normalized error: `kind` (`validation`/`approval_required`/`timeout`/`runtime`/…) + `message` |
 | `ToolContext` | per-call context: `run_id` (correlation), `timeout_s`, `approved` (gate for writes) |
@@ -71,16 +71,22 @@ secrets from log/error strings).
 ## 4. The trust boundary (`engine/tools/dispatch.py`)
 
 Every tool call goes through `dispatch(tool, input, ctx)`, which is **total — it always returns a
-`ToolResult`, never raises**. In order, it:
+`ToolResult`, never raises** (even `spec` access is defensive). In order, it:
 
 1. **Approval gate** — a side-effecting tool (`spec.read_only is False`) runs only when
-   `ctx.approved` is True; otherwise it is *blocked and never executed*.
+   `ctx.approved is True` (strict identity — a truthy string like `"false"` does *not* approve);
+   otherwise it is *blocked and never executed*.
 2. **Input validation** — arguments are validated against the tool's `input_model` *before* the
-   tool runs; malformed args become a `validation` error (the tool never sees them).
+   tool runs; unknown args are **rejected** (`extra="forbid"`), and the error is **value-free**
+   (it names the offending field, never echoes its — possibly secret — value).
 3. **Timeout + bounded concurrency** — the call runs on a bounded worker pool
-   (`TOOL_MAX_CONCURRENCY`, default 4) with a per-call `timeout_s`.
-4. **Normalized errors** — any exception becomes `ToolResult(ok=False, error=ToolError(kind, …))`;
-   a buggy tool can never crash the loop.
+   (`TOOL_MAX_CONCURRENCY`, default 4) with a per-call `timeout_s`; a timed-out call is abandoned
+   and `future.cancel()`-ed (Python can't force-kill a running thread — network tools also set
+   their own transport deadline).
+4. **Normalized errors + result invariants** — any exception becomes
+   `ToolResult(ok=False, error=ToolError(kind, …))`, and the message is **redacted + size-bounded**
+   (SDK errors can embed authenticated URLs/tokens). Invariants are enforced: `ok=False` must carry
+   an error (one is synthesized if missing); `ok=True` *with* an error fails closed.
 5. **Bounded output** — result output is size-capped (`bound_output`).
 6. **Observability** — exactly **one** structured, **redacted** JSON log line per call
    (`tool`, `status`, `ms`, `run_id`) on the `portable_agent.tools` logger — never a secret or a
@@ -106,9 +112,16 @@ tools:
     params: { output: "…" } # adapter construction params (optional)
 ```
 
-`load_tools` returns `[]` when there is **no `tools:` key** — that is the signal
-`engine/graph.py` uses to take the identical `get_sql_tool().ask()` path. **Existing SQL packs are
-untouched.**
+`load_tools` distinguishes three cases so intent is never ambiguous:
+
+| `tools:` in config | `load_tools` returns | behavior |
+|---|---|---|
+| **absent** (or `tools: null`) | `None` | legacy `get_sql_tool().ask()` path — **existing SQL packs untouched** |
+| **`tools: []`** (explicit empty) | `[]` | a deliberately **toolless** agent — no tools *and* no SQL |
+| **`tools: [ … ]`** | list of tools | run the declared read-only tools |
+
+A `tools:` value that is present but not a list (`{}`, `false`, a string) is a **config error** and
+raises — it is never silently coerced to empty.
 
 ---
 
@@ -124,16 +137,24 @@ Registered in the `engine/tools/registry` on import; construct via `build_tool(t
 
 The `http` tool is the reference implementation of the network-safety contract:
 
-- **Allowlist, fail-closed** — calls only configured hosts; an empty allowlist denies everything.
-- **SSRF guard** — the target must not resolve to a private/loopback/link-local/reserved IP
-  (blocks `169.254.169.254`, `127.0.0.1`, `10/8`, …).
-- **Per-hop redirect validation** — redirects are followed *manually* and every hop is
-  re-checked against the allowlist + SSRF guard.
-- **Secrets from env only** — a bearer token is read from an env var *named* by the pack's
-  `token_env`; the value is never written in a pack and never logged.
-- **Bounded** — response size cap, per-call timeout, bounded retries with backoff, optional
-  rate-limit interval.
+- **Allowlist, fail-closed** — calls only configured hosts; an unset *or explicitly empty*
+  (`allow_hosts: []`) allowlist denies everything. A bare string is treated as one host.
+- **SSRF guard** — the target must not resolve to a private/loopback/link-local/reserved/CGNAT
+  (`100.64/10`)/unspecified IP; IPv4-mapped IPv6 is unwrapped; an empty DNS answer fails closed.
+- **Per-hop, per-connect revalidation** — redirects are followed *manually*, and the host +
+  SSRF check runs immediately *before every connect* (each redirect hop and retry), shrinking the
+  DNS-rebinding window. (Residual: the resolved IP is not pinned onto the socket — the **allowlist
+  is the primary control**, since rebinding still requires attacker DNS for an allowlisted host.)
+- **Origin-bound secret** — the bearer token (from the env var *named* by `token_env`) is sent
+  **only to the original request origin and only over https** — never forwarded to a redirected
+  origin, never over an http downgrade, never written in a pack, never logged.
+- **No ambient auth** — a private `trust_env=False` session (no env proxies / `.netrc`); URL
+  userinfo is rejected; `path` must be **relative** (no absolute URL, no `..` escape).
+- **Bounded** — response size cap, per-call timeout *and* a wall-clock deadline across all
+  redirects/retries, bounded retries with backoff, optional rate limit; the response is always closed.
 - **Untrusted output** — the body is returned as plain text evidence, never executed.
+- **Capability** — a GET is `read_only=True` by default; a pack can set `read_only: false` for a
+  known-mutating endpoint so the approval gate applies.
 
 Default `mode` is `mock` (canned, no network), so packs and tests run with no credentials; set
 `mode: http` + an allowlist to make real calls.

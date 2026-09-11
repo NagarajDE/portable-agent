@@ -12,7 +12,7 @@ import pytest
 
 from engine.tools import (
     build_tool, dispatch, known_tools, register, UnknownToolError,
-    ToolContext, ToolResult, ToolSpec, bound_output, redact,
+    ToolContext, ToolResult, ToolError, ToolSpec, bound_output, redact,
 )
 from engine.tools.base import DEFAULT_MAX_OUTPUT_CHARS
 from engine.tools.orchestrator import LoadedTool, load_tools, gather_context, describe_tools
@@ -126,9 +126,21 @@ def test_redact_scrubs_common_secret_shapes():
 
 
 # --- orchestrator: deterministic, read-only auto-run ----------------------
-def test_load_tools_empty_for_legacy_pack():
-    # a pack with no `tools:` key -> [] (signals the legacy single-SQL path in graph)
-    assert load_tools("some_uc", {"default_sql_tool": "mock"}) == []
+def test_load_tools_none_for_legacy_pack():
+    # a pack with NO `tools:` key -> None (signals the legacy single-SQL path in graph)
+    assert load_tools("some_uc", {"default_sql_tool": "mock"}) is None
+    assert load_tools("some_uc", {"tools": None}) is None       # `tools:` null is also legacy
+
+
+def test_load_tools_empty_list_is_toolless():
+    # explicit `tools: []` is a deliberately toolless agent (distinct from the legacy None)
+    assert load_tools("uc", {"tools": []}) == []
+
+
+def test_load_tools_malformed_value_raises():
+    for bad in ({}, False, "sql", 3):                           # present but not a list -> error, not silently empty
+        with pytest.raises(ValueError):
+            load_tools("uc", {"tools": bad})
 
 
 def test_gather_context_with_no_tools_is_safe():
@@ -188,3 +200,61 @@ def test_describe_tools_lists_capability():
     assert "reader (read-only)" in desc
     assert "writer (SIDE-EFFECTING (requires approval))" in desc
     assert describe_tools([]) == "None."
+
+
+# --- hardening: strict approval, extra-arg rejection, result invariants, redaction --------
+def test_approval_gate_requires_literal_true():
+    tool = build_tool("mock", {"read_only": False, "output": "wrote"})
+    for approved in ("true", 1, "yes", [1]):          # truthy but NOT the literal True -> still blocked (M1)
+        r = dispatch(tool, {}, ToolContext(run_id="t", timeout_s=1.0, approved=approved))
+        assert not r.ok and r.error.kind == "approval_required"
+    assert dispatch(tool, {}, ToolContext(run_id="t", timeout_s=1.0, approved=True)).ok
+
+
+def test_dispatch_rejects_unknown_args():
+    # the sql bridge input_model forbids extras -> an unknown arg is a validation error (M3)
+    tool = build_tool("sql", {"default_sql_tool": "mock", "use_case": "dq_qals"})
+    r = dispatch(tool, {"question": "q", "bogus": "x"}, _ctx())
+    assert not r.ok and r.error.kind == "validation"
+
+
+class _FixedResult:
+    """A tool that returns a caller-supplied (possibly malformed) ToolResult, to test invariants."""
+    def __init__(self, res):
+        self.spec = ToolSpec("fixed", "d", read_only=True, input_model=None)
+        self._res = res
+
+    def run(self, input, ctx):
+        return self._res
+
+
+def test_dispatch_normalizes_ok_false_without_error():
+    r = dispatch(_FixedResult(ToolResult(ok=False, output="x")), {}, _ctx())   # ok=False, error=None (M7)
+    assert not r.ok and r.error is not None and r.error.kind == "runtime"
+
+
+def test_dispatch_fails_closed_on_ok_true_with_error():
+    bad = ToolResult(ok=True, output="x", error=ToolError("runtime", "boom"))  # contradictory (M7)
+    r = dispatch(_FixedResult(bad), {}, _ctx())
+    assert not r.ok                                    # presence of an error is authoritative -> failure
+
+
+def test_returned_error_is_redacted_and_bounded():
+    # H3: a tool exception carrying a secret must not leak in the RETURNED error message
+    r = dispatch(build_tool("mock", {"fail": "boom token=SECRETXYZ"}), {}, _ctx())
+    assert not r.ok and "SECRETXYZ" not in r.error.message and "[REDACTED]" in r.error.message
+
+
+def test_validation_error_has_no_input_values():
+    # H4: a rejected extra arg must surface the field NAME, never the (possibly secret) value
+    tool = build_tool("sql", {"default_sql_tool": "mock", "use_case": "dq_qals"})
+    r = dispatch(tool, {"question": "q", "password": "HUNTER2SECRET"}, _ctx())
+    assert not r.ok and r.error.kind == "validation"
+    assert "HUNTER2SECRET" not in r.error.message and "password" in r.error.message
+
+
+def test_redact_scrubs_json_dict_and_url_forms():
+    assert "hunter2" not in redact('{"password": "hunter2"}')       # JSON
+    assert "hunter2" not in redact("{'password': 'hunter2'}")       # python dict repr
+    assert "s3cr3t" not in redact("token=s3cr3t&x=1")               # querystring / env
+    assert "secretpw" not in redact("https://user:secretpw@host/x") # URL userinfo

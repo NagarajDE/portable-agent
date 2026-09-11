@@ -378,15 +378,22 @@ in sync with `git status`.
   `_ensure_read_only()` (single statement, SELECT/WITH only) with a `SQL_TIMEOUT_SECONDS` cap —
   a backstop; the PRIMARY control is granting the service role SELECT-only (see the deploy guide).
 - **Generic tool layer (`engine/tools/`): SQL is ONE tool category, not the engine's assumption.**
-  Packs declare tools in `config.yaml` (`tools:`); a pack with NO `tools:` key takes the identical
-  legacy `get_sql_tool().ask()` path — never regress that. Tool execution is **deterministic**
-  (the engine runs read-only tools up front and feeds observations into `generate`; the LLM does
-  NOT select tools — so tool output can't trigger a tool call). ReAct is deferred behind the same
-  `dispatch()`. Invariants: every call goes through `dispatch()` (validate → approval gate →
-  timeout → normalized `ToolResult` → bounded output → one redacted log line); **config cannot
-  upgrade a tool's `read_only`** (capability lives in the adapter's `ToolSpec`); side-effecting
-  tools run only with `ctx.approved`; keep any vendor SDK import lazy (inside `run`), per the core
-  principle. See [`docs/concepts/tools-and-agents.md`](docs/concepts/tools-and-agents.md).
+  Packs declare tools in `config.yaml` (`tools:`). Routing (in `load_tools`): NO `tools:` key (or
+  `tools:` null) → legacy `get_sql_tool().ask()` path (existing packs unchanged); `tools: []` → a
+  deliberately TOOLLESS agent (no tools AND no SQL); a `tools:` value that isn't a list → config
+  error. Tool execution is **deterministic** (the engine runs read-only tools up front and feeds
+  observations into `generate` ONCE per run; the LLM does NOT select tools — so tool output can't
+  trigger a tool call, and refine never re-runs them). ReAct is deferred behind the same
+  `dispatch()`. Invariants: every call goes through `dispatch()` (defensive `spec` access → approval
+  gate → validate → timeout+`future.cancel()` → result-invariant enforcement → redacted+bounded
+  output AND error → one redacted log line) and it NEVER raises; `read_only` is a **required**
+  `ToolSpec` field (fail-closed authoring) and is **authoritative at dispatch** (an adapter may
+  hardcode it, e.g. sql=read-only, or expose it as config for a tool that's legitimately either,
+  e.g. a mutating GET); side-effecting tools run only when `ctx.approved is True` (strict); keep any
+  vendor SDK import lazy (inside `run`). The `http` tool binds its bearer token to the ORIGINAL https
+  origin (never forwarded across a redirect or over an http downgrade), uses a `trust_env=False`
+  session, re-validates host+SSRF before every connect, and enforces a wall-clock deadline. See
+  [`docs/concepts/tools-and-agents.md`](docs/concepts/tools-and-agents.md).
 - Keep observability OUT of the loop. `graph.py` nodes are pure; all tracing lives in
   `engine/tracing.py` and is applied via `instrument(...)` (node wrapper) + `traced_invoke`
   (run wrapper). Don't add `tracer.event(...)`, timing, or vendor observability SDKs

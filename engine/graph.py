@@ -232,13 +232,14 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     # judge: injected eval wins; else reuse an injected worker (so a real worker isn't paired
     # with a mock judge); else resolve independently from env.
     eval_llm = eval_llm or injected_llm or get_eval_client(use_case)
-    # Generic tool layer. A pack MAY declare `tools:` (one or more named tools); load_tools
-    # builds them. A legacy pack declares none -> load_tools returns [] and we take the
-    # IDENTICAL single-SQL path below, so existing packs' runtime behavior is unchanged.
+    # Generic tool layer. `load_tools` returns None when a pack declares NO `tools:` key -> we take
+    # the IDENTICAL single-SQL path (existing packs unchanged). A list (even empty) means the pack
+    # declared tools explicitly: `tools: []` is a deliberately TOOLLESS agent (no tools AND no SQL).
     loaded_tools = load_tools(use_case, cfg)
-    if not loaded_tools:
+    use_sql = loaded_tools is None
+    if use_sql:
         sql = sql or get_sql_tool(use_case, cfg.get("default_sql_tool", "mock"))
-    tools_desc = describe_tools(loaded_tools)          # {tools} block for the persona ("None." if legacy)
+    tools_desc = describe_tools(loaded_tools or [])    # {tools} block for the persona ("None." if legacy/none)
     skills = load_skills(use_case)
     exemplars = load_exemplars(use_case)
 
@@ -252,10 +253,10 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         # Context source is DETERMINISTIC: a tools pack runs its declared READ-ONLY tools and
         # feeds their observations in; a legacy pack makes the single SQL call, exactly as before.
         # (The model never SELECTS a tool -> tool output can't trigger a tool call: injection-safe.)
-        if loaded_tools:
-            data = gather_context(s["task"], loaded_tools, s.get("run_id", "-"))
-        else:
+        if use_sql:
             data = sql.ask(s["task"])
+        else:
+            data = gather_context(s["task"], loaded_tools, s.get("run_id", "-"))
         answer = llm.complete(fill(_prompt(use_case, "generate.md"),
                                    task=s["task"], data=data, observations=data,
                                    tools=tools_desc, skills=skills,

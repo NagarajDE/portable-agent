@@ -92,17 +92,34 @@ class _Resp:
         pass
 
 
+class _FakeSession:
+    """Models requests.Session: records (url, headers) per hop, replays scripted responses,
+    and lets a scripted Exception be raised (to drive the retry path)."""
+    def __init__(self, responses, calls):
+        self._responses, self.calls, self.trust_env = responses, calls, True
+
+    def get(self, url, headers=None, params=None, timeout=None, allow_redirects=None, stream=None):
+        self.calls.append((url, dict(headers or {})))
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def close(self):
+        pass
+
+
 class _FakeRequests:
     ConnectionError = type("ConnectionError", (Exception,), {})
     Timeout = type("Timeout", (Exception,), {})
 
     def __init__(self, *responses):
         self._responses = list(responses)
-        self.calls = []            # (url, headers)
+        self.calls = []            # (url, headers) across all hops/sessions
 
-    def get(self, url, headers=None, params=None, timeout=None, allow_redirects=None, stream=None):
-        self.calls.append((url, headers or {}))
-        return self._responses.pop(0)
+    def Session(self):
+        return _FakeSession(self._responses, self.calls)
+
 
 
 @pytest.fixture
@@ -168,3 +185,69 @@ def test_http_response_size_is_bounded(fake_requests):
                                "allow_hosts": ["example.com"], "max_bytes": 500})
     r = dispatch(tool, {"path": "/big"}, _ctx())
     assert r.ok and len(r.output) <= 500 + 80          # bounded to max_bytes (+ short truncation note)
+
+
+# --- H6: bearer token is bound to the original origin + https only ------------------------
+def test_http_token_dropped_on_redirect_to_other_origin(fake_requests, monkeypatch):
+    fake = fake_requests(
+        _Resp(302, headers={"Location": "https://other.example.com/moved"}),
+        _Resp(200, body=b"OK"),
+    )
+    monkeypatch.setenv("TOK", "SECRET-XYZ")
+    tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
+                               "allow_hosts": ["example.com"], "token_env": "TOK", "max_redirects": 3})
+    assert dispatch(tool, {"path": "/x"}, _ctx()).ok
+    assert fake.calls[0][1].get("Authorization") == "Bearer SECRET-XYZ"   # hop 1: same origin -> sent
+    assert "Authorization" not in fake.calls[1][1]                        # hop 2: other origin -> dropped
+
+
+def test_http_token_not_sent_over_http_downgrade(fake_requests, monkeypatch):
+    fake = fake_requests(_Resp(200, body=b"OK"))
+    monkeypatch.setenv("TOK", "SECRET-XYZ")
+    tool = build_tool("http", {"mode": "http", "base_url": "http://api.example.com",   # http, not https
+                               "allow_hosts": ["example.com"], "token_env": "TOK"})
+    assert dispatch(tool, {"path": "/x"}, _ctx()).ok
+    assert "Authorization" not in fake.calls[0][1]                        # never send a token over http
+
+
+# --- M9: SSRF classification completeness -------------------------------------------------
+def test_ssrf_blocks_cgnat_and_ipv4_mapped():
+    assert H.resolves_to_blocked_ip("100.64.0.1")       # carrier-grade NAT (RFC 6598)
+    assert H.resolves_to_blocked_ip("::ffff:127.0.0.1")  # IPv4-mapped loopback
+
+
+# --- M10: allowlist semantics -------------------------------------------------------------
+def test_allow_hosts_explicit_empty_denies(fake_requests, monkeypatch):
+    monkeypatch.setenv("HTTP_TOOL_ALLOWLIST", "example.com")   # env has a host...
+    tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
+                               "allow_hosts": []})              # ...but explicit [] must NOT fall back
+    r = dispatch(tool, {"path": "/x"}, _ctx())
+    assert not r.ok                                            # host denied
+
+
+def test_allow_hosts_string_is_single_host(fake_requests):
+    fake_requests(_Resp(200, body=b"OK"))
+    tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
+                               "allow_hosts": "example.com"})   # a bare string, not char-split
+    assert dispatch(tool, {"path": "/x"}, _ctx()).ok
+
+
+# --- M11: mode validation -----------------------------------------------------------------
+def test_bad_mode_raises_at_construction():
+    with pytest.raises(ValueError):
+        build_tool("http", {"mode": "offline"})                # a typo must NOT silently enable networking
+
+
+# --- M12: path must be relative, no parent-dir escape -------------------------------------
+def test_path_absolute_url_rejected(fake_requests):
+    fake_requests(_Resp(200, body=b"x"))
+    tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
+                               "allow_hosts": ["example.com"]})
+    assert not dispatch(tool, {"path": "http://evil.com/"}, _ctx()).ok
+
+
+def test_path_dotdot_rejected(fake_requests):
+    fake_requests(_Resp(200, body=b"x"))
+    tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
+                               "allow_hosts": ["example.com"]})
+    assert not dispatch(tool, {"path": "../../admin"}, _ctx()).ok
