@@ -1,0 +1,8 @@
+# _TEMPLATE — copy this whole folder to usecases/<your_pack>/ to start a new agent.
+# See docs/concepts/use-case-pack-anatomy.md for what each file is + the new-pack checklist.
+inherits: [shared]
+name: "TEMPLATE agent (copy me)"
+sample_task: "What is the total value across items?"
+
+# This template is a single-SQL agent (no `tools:` key -> legacy SQL path). For a NON-SQL agent,
+# declare tools: here and add  exclude_shared_skills: [sql_safety]  so SQL rules aren't injected.

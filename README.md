@@ -23,6 +23,9 @@ Host on Databricks with one shell file.
 > Tools and agents — the generic tool layer (SQL is one tool of many), its safety model, and
 > how to add a tool-using pack: [`docs/concepts/tools-and-agents.md`](docs/concepts/tools-and-agents.md).
 >
+> Authoring a use-case pack — what each folder is, the composition/override rules, and a new-pack
+> checklist (copy `usecases/_TEMPLATE/`): [`docs/concepts/use-case-pack-anatomy.md`](docs/concepts/use-case-pack-anatomy.md).
+>
 > Run locally on Windows against real Snowflake Cortex (or Databricks):
 > [`docs/run-locally-windows.md`](docs/run-locally-windows.md).
 

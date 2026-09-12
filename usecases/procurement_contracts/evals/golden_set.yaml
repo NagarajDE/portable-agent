@@ -1,0 +1,4 @@
+# Sample questions authored for the iCertis contracts view (native agent ships none). On the mock
+# provider these hit fixtures.py; against the live view, replace expect_contains with verified facts.
+- question: "What is the total active contract value by supplier for the top 10 suppliers?"
+  expect_contains: ["Wayne"]

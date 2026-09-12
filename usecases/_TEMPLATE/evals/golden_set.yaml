@@ -1,0 +1,4 @@
+# Held-out regression questions (test-time only, run by run_evals.py). expect_contains = substrings
+# the answer must include (case-insensitive). Prefer tokens the model won't reformat.
+- question: "What is the total value across items?"
+  expect_contains: ["17"]

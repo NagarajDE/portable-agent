@@ -2,7 +2,7 @@
 import pytest
 
 import engine.llm_client as _llm
-from engine.sql_tool import _ensure_read_only, CortexAnalystTool
+from engine.sql_tool import _ensure_read_only, CortexAnalystTool, get_sql_tool
 
 
 def test_allows_select():
@@ -76,32 +76,70 @@ def test_allows_legit_escaped_and_quoted_identifiers(ok):
     assert _ensure_read_only(ok)
 
 
-# --- CortexAnalystTool: semantic layer selection (view OR stage YAML) -------
+# --- CortexAnalystTool: the semantic layer comes from the PACK (a dict), NEVER env ----------
 @pytest.fixture
 def _no_snowpark(monkeypatch):
     """Stub the Snowpark session so __init__ doesn't need live creds."""
     monkeypatch.setattr(_llm, "snowpark_session", lambda: object())
 
 
-def test_cortex_prefers_semantic_view(monkeypatch, _no_snowpark):
-    monkeypatch.setenv("CORTEX_SEMANTIC_VIEW", "DB.SCHEMA.MY_VIEW")
-    monkeypatch.setenv("CORTEX_SEMANTIC_MODEL", "@DB.SCHEMA.STAGE/m.yaml")  # both set -> view wins
-    assert CortexAnalystTool()._semantic == {"semantic_view": "DB.SCHEMA.MY_VIEW"}
+def test_cortex_prefers_semantic_view(_no_snowpark):
+    # both keys present -> view wins (mirrors the prior precedence, now on the passed-in block)
+    tool = CortexAnalystTool({"view": "DB.SCHEMA.MY_VIEW", "model_file": "@DB.SCHEMA.STAGE/m.yaml"})
+    assert tool._semantic == {"semantic_view": "DB.SCHEMA.MY_VIEW"}
 
 
-def test_cortex_falls_back_to_stage_yaml(monkeypatch, _no_snowpark):
-    monkeypatch.delenv("CORTEX_SEMANTIC_VIEW", raising=False)
-    monkeypatch.setenv("CORTEX_SEMANTIC_MODEL", "@DB.SCHEMA.STAGE/m.yaml")
-    assert CortexAnalystTool()._semantic == {"semantic_model_file": "@DB.SCHEMA.STAGE/m.yaml"}
+def test_cortex_falls_back_to_stage_yaml(_no_snowpark):
+    assert CortexAnalystTool({"model_file": "@DB.SCHEMA.STAGE/m.yaml"})._semantic == \
+        {"semantic_model_file": "@DB.SCHEMA.STAGE/m.yaml"}
+
+
+def test_cortex_ignores_env_semantic_layer(monkeypatch, _no_snowpark):
+    # engine/ must NOT read env for functional config: even with env set, the PACK block wins.
+    monkeypatch.setenv("CORTEX_SEMANTIC_VIEW", "ENV.DB.SHOULD_BE_IGNORED")
+    monkeypatch.setenv("CORTEX_SEMANTIC_MODEL", "@ENV/ignored.yaml")
+    assert CortexAnalystTool({"view": "PACK.DB.MY_VIEW"})._semantic == {"semantic_view": "PACK.DB.MY_VIEW"}
 
 
 def test_cortex_requires_a_semantic_layer_before_session(monkeypatch):
     # NO snowpark stub on purpose: the semantic-layer check must fail FIRST, so a missing
-    # config raises the clear KeyError even if a session could never be opened (ordering).
+    # block raises the clear KeyError even if a session could never be opened (ordering).
     def _boom():
         raise RuntimeError("session should not be attempted before the semantic-layer check")
     monkeypatch.setattr(_llm, "snowpark_session", _boom)
-    monkeypatch.delenv("CORTEX_SEMANTIC_VIEW", raising=False)
-    monkeypatch.delenv("CORTEX_SEMANTIC_MODEL", raising=False)
     with pytest.raises(KeyError):
-        CortexAnalystTool()
+        CortexAnalystTool({})            # empty block -> neither view nor model_file
+
+
+# --- get_sql_tool: platform selection + two-sided guard rails -------------------------------
+def test_get_sql_tool_mock_ignores_semantic_layer(monkeypatch):
+    # mock is a fixture path: even with no layer, a mock run must work (non-AI+BI packs are fine).
+    monkeypatch.setenv("SQL_TOOL", "mock")
+    tool = get_sql_tool("dq_qals", "mock", semantic_layer=None)
+    assert hasattr(tool, "ask")          # MockSQLTool from the pack fixtures
+
+
+def test_get_sql_tool_cortex_selects_snowflake_block(monkeypatch, _no_snowpark):
+    monkeypatch.setenv("SQL_TOOL", "cortex")
+    tool = get_sql_tool("any_pack", "mock", semantic_layer={"snowflake": {"view": "DB.S.V"}})
+    assert tool._semantic == {"semantic_view": "DB.S.V"}
+
+
+def test_get_sql_tool_cortex_missing_layer_is_guard_railed(monkeypatch):
+    monkeypatch.setenv("SQL_TOOL", "cortex")
+    with pytest.raises(KeyError):        # an Analyst pack that declared no semantic layer
+        get_sql_tool("some_pack", "mock", semantic_layer=None)
+
+
+def test_get_sql_tool_genie_selects_databricks_block(monkeypatch):
+    # GenieTool is a stub that raises NotImplementedError at construction; a present databricks
+    # block gets PAST the guard rail (reaching the stub), which proves platform selection works.
+    monkeypatch.setenv("SQL_TOOL", "genie")
+    with pytest.raises(NotImplementedError):
+        get_sql_tool("p", "mock", semantic_layer={"databricks": {"metric_view": "m.s.v"}})
+
+
+def test_get_sql_tool_genie_missing_block_is_guard_railed(monkeypatch):
+    monkeypatch.setenv("SQL_TOOL", "genie")
+    with pytest.raises(KeyError):        # a snowflake-only pack has no databricks block
+        get_sql_tool("p", "mock", semantic_layer={"snowflake": {"view": "DB.S.V"}})

@@ -3,9 +3,9 @@ Network-safety tests for the ONE generic HTTP tool. No real network: the pure sa
 are tested with host/IP literals, and the real GET path is tested against a FAKE `requests`
 module injected via sys.modules (so redirects, headers, and byte-bounds are deterministic).
 
-Proves: allowlist (fail-closed), SSRF guard (private/loopback/link-local/reserved),
-scheme check, per-hop redirect re-validation, bearer token sourced from ENV only, and the
-response-size bound.
+Proves: allowlist (fail-closed), SSRF guard (private/loopback/link-local/reserved/site-local),
+scheme check, per-hop redirect re-validation, redirect query preservation, bearer token sourced
+from ENV only, and the response-size bound.
 """
 import sys
 
@@ -32,7 +32,7 @@ def test_allowlist_empty_denies_all():
 
 
 @pytest.mark.parametrize("ip", ["127.0.0.1", "10.0.0.5", "192.168.1.9", "169.254.169.254",
-                                 "::1", "0.0.0.0", "224.0.0.1"])
+                                 "::1", "0.0.0.0", "224.0.0.1", "fec0::1"])
 def test_ssrf_blocks_non_public_ips(ip):
     assert H.resolves_to_blocked_ip(ip)
 
@@ -90,6 +90,7 @@ class _Resp:
     def __init__(self, status=200, headers=None, body=b"", raise_for=None, read_exc=None):
         self.status_code, self.headers, self._raise = status, headers or {}, raise_for
         self.is_redirect = status in (301, 302, 303, 307, 308)
+        self.url = ""                                 # stamped by the session at get() time (like requests)
         self.raw = _Raw(body, read_exc)              # persistent + stateful
 
     def raise_for_status(self):
@@ -111,6 +112,8 @@ class _FakeSession:
         item = self._responses.pop(0)
         if isinstance(item, Exception):
             raise item
+        from urllib.parse import urlencode                 # requests stamps resp.url with the URL it
+        item.url = url + (("&" if "?" in url else "?") + urlencode(params) if params else "")  # actually fetched (incl. params); the redirect base relies on it
         return item
 
     def close(self):
@@ -315,3 +318,17 @@ def test_http_body_read_error_is_retried(fake_requests):
                                "allow_hosts": ["example.com"], "retries": 1, "backoff_s": 0})
     r = dispatch(tool, {"path": "/x"}, _ctx())
     assert r.ok and "RECOVERED" in r.output and len(fake.calls) == 2
+
+
+def test_http_fragment_redirect_preserves_query(fake_requests):
+    # NB4: a fragment-only Location must resolve against the URL actually fetched (incl. the query),
+    # not the base without it -- otherwise ?tenant=A is silently dropped on the redirect hop.
+    fake = fake_requests(
+        _Resp(302, headers={"Location": "#section"}),   # hop0 -> fragment-only redirect
+        _Resp(200, body=b"OK"),                          # hop1 -> success
+    )
+    tool = build_tool("http", {"mode": "http", "base_url": "https://api.example.com",
+                               "allow_hosts": ["example.com"], "max_redirects": 3})
+    r = dispatch(tool, {"path": "/x", "query": {"tenant": "A"}}, _ctx())
+    assert r.ok and "OK" in r.output and len(fake.calls) == 2
+    assert "tenant=A" in fake.calls[-1][0]               # the query survived the fragment redirect

@@ -95,21 +95,24 @@ def _ensure_read_only(sql: str) -> str:
 
 # Snowflake Cortex Analyst -- text-to-SQL over a semantic model (REST), SQL run via Snowpark.
 class CortexAnalystTool:
-    def __init__(self):
+    def __init__(self, semantic: dict | None):
         # Resolve the semantic layer FIRST, so a missing/misconfigured layer fails with a clear
         # message BEFORE we open a Snowpark session (which needs creds + network and would
         # otherwise mask this error). Cortex Analyst accepts EITHER a native Semantic View (an
-        # object already in the account) OR a semantic model YAML on a stage; prefer an existing
-        # view if set; exactly one is required. This is the only place the two forms differ.
-        view = (os.getenv("CORTEX_SEMANTIC_VIEW") or "").strip()     # DB.SCHEMA.MY_SEMANTIC_VIEW
-        model = (os.getenv("CORTEX_SEMANTIC_MODEL") or "").strip()   # @db.schema.stage/model.yaml
+        # object already in the account) OR a semantic model YAML on a stage; prefer the view if
+        # both are given. The binding is the pack's `snowflake:` block from
+        # usecases/<pack>/semantic_layer.yaml, passed in by get_sql_tool -- engine/ NEVER reads env
+        # for it (any env-vs-pack override is a TEST concern applied by the runner scripts).
+        view = str((semantic or {}).get("view", "")).strip()         # DB.SCHEMA.MY_SEMANTIC_VIEW
+        model = str((semantic or {}).get("model_file", "")).strip()  # @db.schema.stage/model.yaml
         if view:
             self._semantic = {"semantic_view": view}
         elif model:
             self._semantic = {"semantic_model_file": model}
         else:
-            raise KeyError("SQL_TOOL=cortex needs a semantic layer: set CORTEX_SEMANTIC_VIEW "
-                           "(a native Semantic View) or CORTEX_SEMANTIC_MODEL (a stage YAML).")
+            raise KeyError("Cortex Analyst pack declares no semantic layer: the `snowflake:` block "
+                           "in the pack's semantic_layer.yaml needs `view:` (a native Semantic View) "
+                           "or `model_file:` (a stage YAML).")
         from engine.llm_client import snowpark_session
         self._s = snowpark_session()                                 # runs the generated SQL
 
@@ -151,22 +154,35 @@ class CortexAnalystTool:
 # opaque error mid-request. To run on Databricks today, use SQL_TOOL=mock until this is
 # implemented (mirror CortexAnalystTool: start/continue a Genie conversation, run the SQL).
 class GenieTool:
-    def __init__(self):
+    def __init__(self, semantic: dict | None = None):    # semantic: the pack's `databricks:` block
         raise NotImplementedError(
             "SQL_TOOL=genie is not implemented yet. Use SQL_TOOL=mock on Databricks for now, "
-            "or wire the Genie conversation API here (see engine/sql_tool.py).")
+            "or wire the Genie conversation API here (see engine/sql_tool.py). The pack's "
+            "`databricks:` semantic-layer block (metric_view | genie_space) is passed in here.")
 
     def ask(self, question: str) -> str:                 # pragma: no cover - unreachable until wired
         raise NotImplementedError
 
 
-def get_sql_tool(use_case: str | None = None, default: str = "mock") -> SQLTool:
+def get_sql_tool(use_case: str | None = None, default: str = "mock",
+                 semantic_layer: dict | None = None) -> SQLTool:
     # env SQL_TOOL wins; else the pack's default_sql_tool (passed in) -- no os.environ mutation,
-    # so one graph's default can't leak to the next in the same process.
+    # so one graph's default can't leak to the next in the same process. (SQL_TOOL selects the tool
+    # KIND; it is NOT functional config -- the semantic layer that follows comes from the PACK.)
     tool = (os.getenv("SQL_TOOL") or default).strip().lower()
-    if tool == "mock":                                   # mock is a use-case fixture
+    if tool == "mock":                                   # mock is a use-case fixture; semantic layer N/A
         mod = importlib.import_module(f"usecases.{use_case}.fixtures")
         return mod.MockSQLTool()
     if tool not in ("cortex", "genie"):
         raise ValueError(f"unknown SQL_TOOL: {tool!r} (expected mock|cortex|genie)")
-    return {"cortex": CortexAnalystTool, "genie": GenieTool}[tool]()
+    # A LIVE text-to-SQL tool needs a semantic layer DECLARED BY THE PACK. Select the block for the
+    # active platform (cortex->snowflake, genie->databricks); a missing/empty one is a guard-rail
+    # error -- an AI+BI pack MUST ship usecases/<pack>/semantic_layer.yaml (see load_semantic_layer).
+    platform = "snowflake" if tool == "cortex" else "databricks"
+    block = (semantic_layer or {}).get(platform)
+    if not block:
+        raise KeyError(
+            f"SQL_TOOL={tool} needs a `{platform}:` semantic layer, but pack {use_case!r} declares "
+            f"none. Add usecases/{use_case}/semantic_layer.yaml with a `{platform}:` block, or run "
+            f"SQL_TOOL=mock (a non-AI+BI pack must not select a live text-to-SQL tool).")
+    return CortexAnalystTool(block) if tool == "cortex" else GenieTool(block)

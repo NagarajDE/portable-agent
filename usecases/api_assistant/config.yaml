@@ -2,6 +2,9 @@ inherits: [shared]
 name: "API assistant (generic, non-SQL example)"
 sample_task: "Is the orders service healthy, and who owns it?"
 
+# Non-SQL agent: opt OUT of the shared SELECT-only skill so SQL rules aren't injected here (#7).
+exclude_shared_skills: [sql_safety]
+
 # Demonstrates the GENERIC tool layer with TWO read-only tools, run deterministically with
 # NO credentials and NO network:
 #   catalog -> a mock service-catalog lookup (in-process canned data)

@@ -19,6 +19,7 @@ except ImportError:
 from engine.graph import build_graph, initial_state, load_config
 from engine.tracing import traced_invoke
 from engine.memory import remember_run
+from runner_env import semantic_override      # TEST/DEV-only env->pack override (kept in one place)
 
 def main():
     args = sys.argv[1:]
@@ -28,7 +29,7 @@ def main():
     task = " ".join(args[1:]).strip() or os.getenv("QUESTION") or cfg["sample_task"]
     print(f"\nUSE CASE: {cfg['name']}  [{use_case}]")
     print(f"TASK    : {task}\n" + "-" * 68)
-    app = build_graph(use_case)
+    app = build_graph(use_case, semantic_layer=semantic_override())
     final = traced_invoke(app, initial_state(task), use_case)
     remember_run(final, use_case)                   # episodic capture (no-op unless MEMORY_STORE set)
     print("-" * 68)

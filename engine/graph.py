@@ -46,6 +46,21 @@ def load_config(use_case: str) -> dict:
     return merged
 
 
+def load_semantic_layer(use_case: str) -> dict | None:
+    """The pack's NATIVE semantic layer (AI+BI/Analyst-backed packs only), read from
+    usecases/<pack>/semantic_layer.yaml. FILE PRESENCE marks the pack as AI+BI-backed:
+    absent -> None, so the engine never looks for a semantic layer (guard rail for non-AI+BI
+    packs -- they run SQL_TOOL=mock or a generic tools: layer). Pack-ONLY: a pack's binding is
+    inherently pack-specific, so it is NOT inherited/merged from shared (unlike config.yaml).
+    engine/ reads it from HERE, never from env -- any env-vs-pack override is a TEST concern
+    handled in the runner scripts (run_local.py / run_evals.py). A present-but-empty file returns
+    {} so the platform-selection guard rail in get_sql_tool reports it clearly."""
+    f = USECASES / use_case / "semantic_layer.yaml"
+    if not f.exists():
+        return None
+    return yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+
+
 def _prompt(use_case: str, name: str) -> str:
     """Pack's prompt if present, else fall back to shared/ (override semantics)."""
     for base in (USECASES / use_case / "prompts", SHARED / "prompts"):
@@ -55,20 +70,31 @@ def _prompt(use_case: str, name: str) -> str:
     raise FileNotFoundError(f"{name} not found in pack or shared")
 
 
-def load_skills(use_case: str) -> str:
-    """shared skills + pack skills, concatenated (additive)."""
+def load_skills(use_case: str, exclude_shared: list | None = None) -> str:
+    """shared skills + pack skills, concatenated (additive). A pack may drop specific SHARED skills
+    (by filename stem) via `exclude_shared_skills:` in its config -- e.g. a non-SQL pack excludes
+    `sql_safety` so SELECT-only rules aren't injected into a non-SQL agent's prompt. Pack skills are
+    never excluded (they are all in-scope by construction)."""
+    drop = {str(s).strip().lower() for s in (exclude_shared or [])}
+    shared_dir = SHARED / "skills"
     files = []
-    for base in (SHARED / "skills", USECASES / use_case / "skills"):
+    for base in (shared_dir, USECASES / use_case / "skills"):
         if base.exists():
-            files += sorted(base.glob("*.md"))
+            for f in sorted(base.glob("*.md")):
+                if base == shared_dir and f.stem.lower() in drop:
+                    continue                           # pack opted out of this shared skill
+                files.append(f)
     return "\n\n".join(f.read_text(encoding="utf-8").strip() for f in files) if files else "None."
 
 
 def _format_exemplar(p: dict) -> str:
-    """Render ONE exemplar. A legacy verified question->SQL pair ({question, sql}) renders
-    EXACTLY as before (Q:/SQL:); a domain-neutral pair ({input|question, output|answer})
-    renders as Input:/Output:. Both shapes may coexist in a pack."""
-    if "sql" in p:                                     # legacy verified Q->SQL (unchanged)
+    """Render ONE exemplar. An explicit `kind:` selects the format; when it's absent we fall back to
+    key-sniffing (presence of `sql`) so existing packs are unchanged (backward compatible).
+      kind: text_to_sql   -> Q:/SQL:        (fields: question, sql)
+      kind: input_output  -> Input:/Output: (fields: input|question, output|answer)
+    Prefer an explicit `kind:` once a pack mixes formats -- it's a real discriminator, not a guess."""
+    kind = str(p.get("kind", "")).strip().lower()
+    if kind == "text_to_sql" or (not kind and "sql" in p):   # verified Q->SQL
         return f"Q: {p['question']}\nSQL: {p['sql']}"
     prompt = p.get("input", p.get("question", ""))     # domain-neutral input->output
     output = p.get("output", p.get("answer", ""))
@@ -204,7 +230,7 @@ class State(TypedDict):
 
 def build_graph(use_case: str, llm: LLMClient | None = None,
                 sql: SQLTool | None = None, eval_llm: LLMClient | None = None,
-                verbose: bool = True):
+                semantic_layer: dict | None = None, verbose: bool = True):
     cfg = load_config(use_case)
     # max_score = the rubric denominator / validation cap; pass_score = the stop threshold.
     # `threshold` is kept as the backward-compatible alias for pass_score.
@@ -237,10 +263,14 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     # declared tools explicitly: `tools: []` is a deliberately TOOLLESS agent (no tools AND no SQL).
     loaded_tools = load_tools(use_case, cfg)
     use_sql = loaded_tools is None
-    if use_sql:
-        sql = sql or get_sql_tool(use_case, cfg.get("default_sql_tool", "mock"))
+    if use_sql and sql is None:
+        # Functional config: the semantic layer comes from the PACK (semantic_layer.yaml), read here
+        # -- NOT from env. `semantic_layer=` is a dependency-injection seam (like `sql`/`llm`): the
+        # runner scripts pass an env-derived override through it for TEST runs; unset -> pack file.
+        semantic = semantic_layer or load_semantic_layer(use_case)
+        sql = get_sql_tool(use_case, cfg.get("default_sql_tool", "mock"), semantic)
     tools_desc = describe_tools(loaded_tools or [])    # {tools} block for the persona ("None." if legacy/none)
-    skills = load_skills(use_case)
+    skills = load_skills(use_case, cfg.get("exclude_shared_skills"))
     exemplars = load_exemplars(use_case)
 
     def log(m):

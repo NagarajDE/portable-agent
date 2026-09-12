@@ -1,0 +1,5 @@
+# ILLUSTRATIVE question -> SQL over the iCertis procurement analytics semantic view. NOT validated
+# against the live schema — Cortex Analyst generates the real SQL. Shows intent: active scope + top-K.
+- kind: text_to_sql
+  question: "Top vendors by total active SOW contract value"
+  sql: "SELECT VendorName, SUM(ContractValue) AS TotalValue FROM ICERTIS_PROCUREMENT_ANALYTICS WHERE ContractType = 'SOW' AND Status = 'Active' GROUP BY VendorName ORDER BY TotalValue DESC LIMIT 10"

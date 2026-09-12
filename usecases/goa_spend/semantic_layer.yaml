@@ -1,0 +1,7 @@
+# Native semantic layer for this AI+BI/Analyst pack. The PRESENCE of this file marks the pack as
+# Analyst-backed; engine/ reads the binding from HERE, never from env (any env-vs-pack override is
+# a test-only concern in the runner scripts). Mirrors native agent GOA_SPEND_ANALYTICS_AGENT.
+snowflake:
+  view: DB_ENTERPRISE_DW_VAL.GSC_PROCUREMENT.INDIRECT_SPEND   # a native Semantic View
+  # --- OR, instead of `view:` (declare exactly one) ---
+  # model_file: "@DB.SCHEMA.STAGE/model.yaml"                 # a semantic-model YAML on a stage

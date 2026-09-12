@@ -1,0 +1,6 @@
+# ILLUSTRATIVE question -> SQL over the iCertis contracts semantic view (ICERTIS_CONTRACTS). NOT
+# validated against the live schema — Cortex Analyst generates the real SQL. Shows intent: active
+# status, amendment-aware value (UPDATED_CONTRACT_VALUE), top-K by supplier.
+- kind: text_to_sql
+  question: "Total active contract value by supplier (top 10)"
+  sql: "SELECT SUPPLIER_NAME, SUM(COALESCE(UPDATED_CONTRACT_VALUE, CONTRACT_VALUE)) AS TotalValue FROM ICERTIS_CONTRACTS WHERE BUSINESS_STATUS = 'Active' GROUP BY SUPPLIER_NAME ORDER BY TotalValue DESC LIMIT 10"

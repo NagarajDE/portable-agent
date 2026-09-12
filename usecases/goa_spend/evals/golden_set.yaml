@@ -1,0 +1,4 @@
+# Sample questions mirrored from the native GOA_SPEND_ANALYTICS_AGENT. On the mock provider these hit
+# fixtures.py; against the live INDIRECT_SPEND view, replace expect_contains with facts you verify.
+- question: "What are the top 10 vendors by spend, and what % of total does each represent?"
+  expect_contains: ["Acme"]

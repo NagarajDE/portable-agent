@@ -1,0 +1,6 @@
+# ILLUSTRATIVE question -> SQL over the indirect-spend semantic view (INDIRECT_SPEND). NOT validated
+# against the live schema — Cortex Analyst generates the real SQL. Shows intent: InvoiceUSD (signed),
+# fiscal periods, and the categorized-vs-all scope filter.
+- kind: text_to_sql
+  question: "Top 10 vendors by categorized (sourcing-actionable) spend this fiscal year, with % of total"
+  sql: "SELECT VendorName, SUM(InvoiceUSD) AS Spend FROM INDIRECT_SPEND WHERE ExecutiveCategory IS NOT NULL AND FiscalYear_BVDATE = YEAR(CURRENT_DATE) GROUP BY VendorName ORDER BY Spend DESC LIMIT 10"

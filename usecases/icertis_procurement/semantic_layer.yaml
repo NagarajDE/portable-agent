@@ -1,0 +1,5 @@
+# Native semantic layer for this AI+BI/Analyst pack. The PRESENCE of this file marks the pack as
+# Analyst-backed; engine/ reads the binding from HERE, never from env (any env-vs-pack override is
+# a test-only concern in the runner scripts). Mirrors native agent ICERTIS_PROCUREMENT_AGENT.
+snowflake:
+  view: OPERATIONS_DEV.OPERATIONS_SANDBOX.ICERTIS_PROCUREMENT_ANALYTICS   # a native Semantic View

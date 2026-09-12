@@ -1,0 +1,16 @@
+# EXAMPLE (inactive by design -- note the `.example.` in the name). Copy to `semantic_layer.yaml`
+# ONLY if this is an AI+BI/Analyst-backed pack (one that runs SQL_TOOL=cortex or =genie).
+#
+# The PRESENCE of `semantic_layer.yaml` is what marks a pack as Analyst-backed: a non-AI+BI pack
+# (mock fixtures, or a generic `tools:` layer) ships NO such file, and the engine never looks for a
+# semantic layer. engine/ reads this binding from the PACK, never from env (any env-vs-pack override
+# is a test-only concern handled by the runner scripts). This is why the template stays mock-runnable.
+#
+# Declare the block(s) for the platform(s) you run on -- the active tool selects one:
+#   SQL_TOOL=cortex -> snowflake ;  SQL_TOOL=genie -> databricks.
+snowflake:
+  view: MY_DB.MY_SCHEMA.MY_SEMANTIC_VIEW              # an existing native Semantic View
+  # --- OR, instead of `view:` (declare exactly one; view wins if both are set) ---
+  # model_file: "@MY_DB.MY_SCHEMA.MY_STAGE/model.yaml"   # a semantic-model YAML on a stage
+databricks:                                            # optional; ready for when Genie is wired
+  metric_view: main.my_schema.my_metric_view           # OR  genie_space: <space-id>

@@ -15,6 +15,7 @@ each artifact file appears in the correct prompt:
 Fully offline/deterministic (no provider, no credentials). All test code lives here in tests/.
 """
 import re
+import socket
 import uuid
 
 import pytest
@@ -42,6 +43,30 @@ class _Capture:
 class _FakeSql:
     def ask(self, q):
         return "LOCATION | UNITS\nX | 1\nY | 2"
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """T5: make network denial EXPLICIT -- any real socket use in these offline wiring tests fails
+    loudly. Models/SQL are injected doubles and tools run in mock mode, so nothing should touch the
+    network; this proves it instead of relying on implicit fixtures."""
+    def _boom(*a, **k):
+        raise AssertionError("unexpected network call in an offline wiring test")
+    monkeypatch.setattr(socket, "socket", _boom)
+    monkeypatch.setattr(socket, "getaddrinfo", _boom)
+
+
+def _shared_only_line(shared_path, pack_path) -> str:
+    """A distinctive shared-rubric line that does NOT appear in the pack rubric -- used to prove an
+    override REPLACES (not concatenates) the shared rubric."""
+    pack_text = pack_path.read_text(encoding="utf-8")
+    for line in shared_path.read_text(encoding="utf-8").splitlines():
+        s = line.strip().lstrip("#-*>0123456789. ").strip()
+        if "{" in s or "}" in s:
+            continue
+        if len(re.findall(r"[A-Za-z]{3,}", s)) >= 4 and s not in pack_text:
+            return s
+    return ""
 
 
 def _distinctive(path) -> str:
@@ -89,9 +114,13 @@ def test_shared_and_pack_skills_reach_generate(use_case):
 def test_skills_reach_refine(use_case):
     worker, _ = _run(use_case)
     assert len(worker.prompts) >= 2, f"{use_case}: expected a refine to run"
-    pack_skills = sorted((USECASES / use_case / "skills").glob("*.md"))
-    fp = _distinctive(pack_skills[0])
-    assert fp in worker.prompts[1], f"{use_case}: pack skills NOT in refine prompt"
+    refine_prompt = worker.prompts[1]
+    skill_files = sorted((SHARED / "skills").glob("*.md")) + sorted((USECASES / use_case / "skills").glob("*.md"))
+    assert skill_files, f"{use_case}: no skill files found"
+    for f in skill_files:                               # ALL shared+pack skills reach refine (T1)
+        fp = _distinctive(f)
+        assert fp, f"{use_case}: skill '{f.name}' has no distinctive fingerprint"
+        assert fp in refine_prompt, f"{use_case}: skill '{f.name}' NOT in refine prompt (fp={fp!r})"
 
 
 # --- exemplars are injected into generate ----------------------------------
@@ -103,8 +132,9 @@ def test_exemplars_reach_generate(use_case):
     for f in sorted((USECASES / use_case / "exemplars").glob("*.yaml")):
         items += yaml.safe_load(f.read_text(encoding="utf-8")) or []
     assert items, f"{use_case}: no exemplars found"
-    q = items[0].get("question") or items[0].get("input")
-    assert q and q in gen, f"{use_case}: exemplar '{q}' NOT in generate prompt"
+    for it in items:                                    # ALL exemplars, not just the first (T2)
+        q = it.get("question") or it.get("input")
+        assert q and q in gen, f"{use_case}: exemplar '{q}' NOT in generate prompt"
 
 
 # --- the EFFECTIVE rubric reaches the judge (override vs inherit) -----------
@@ -125,15 +155,37 @@ def test_effective_refine_template_used(use_case):
 
 
 # --- override vs inherit, made explicit ------------------------------------
+@pytest.mark.parametrize("use_case", PACKS)
+def test_effective_generate_template_used(use_case):
+    worker, _ = _run(use_case)
+    tpl = _effective_prompt(use_case, "generate.md")
+    fp = _distinctive(tpl)
+    assert fp and fp in worker.prompts[0], f"{use_case}: generate template '{tpl}' NOT used (fp={fp!r})"
+
+
 def test_rubric_override_and_inherit_are_distinct():
     # dq_qals OVERRIDES the rubric -> the judge sees the pack's rubric text
     _, judge = _run("dq_qals")
     assert _distinctive(USECASES / "dq_qals" / "prompts" / "rubric.md") in judge.prompts[0]
+    # PRECEDENCE (not just presence): an override REPLACES shared, so a shared-ONLY line is absent (T4)
+    shared_only = _shared_only_line(SHARED / "prompts" / "rubric.md",
+                                    USECASES / "dq_qals" / "prompts" / "rubric.md")
+    assert shared_only, "expected a shared-only rubric line to test precedence"
+    assert shared_only not in judge.prompts[0], "override must REPLACE the shared rubric, not concatenate it"
     # api_assistant has NO rubric.md -> it INHERITS shared; the judge sees the SHARED rubric text
     assert not (USECASES / "api_assistant" / "prompts" / "rubric.md").exists()
     _, ijudge = _run("api_assistant",
                      worker=_Capture("d"), judge=_Capture("SCORE: 18/18 - ok"))
     assert _distinctive(SHARED / "prompts" / "rubric.md") in ijudge.prompts[0]
+
+
+# --- #7: a pack can opt OUT of a shared skill (config-driven, end to end) ---
+def test_pack_can_exclude_a_shared_skill():
+    # api_assistant (non-SQL) sets exclude_shared_skills: [sql_safety]; reporting (universal) stays.
+    worker, _ = _run("api_assistant", worker=_Capture("a", "b"), judge=_Capture("SCORE: 1/18 - low"))
+    gen = worker.prompts[0]
+    assert _distinctive(SHARED / "skills" / "reporting.md") in gen        # universal skill kept
+    assert _distinctive(SHARED / "skills" / "sql_safety.md") not in gen   # SQL skill dropped for a non-SQL pack
 
 
 # --- DECISIVE: loaders read the folders LIVE, nothing is hardcoded ----------

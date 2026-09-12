@@ -61,19 +61,27 @@ You should see the loop print a climbing score ending in `BEST SCORE : 18/18`.
 
 ---
 
-## 2. Two ways to point Cortex at your semantic layer
+## 2. Point a pack at your semantic layer
 
-Cortex Analyst turns the question into SQL using a semantic layer. The adapter
-(`engine/sql_tool.py` → `CortexAnalystTool`) accepts **either** form; set exactly one in
-`.env` (if both are set, the **view wins**):
+Cortex Analyst turns the question into SQL using a semantic layer. An AI+BI/Analyst pack **declares
+which one it uses** in its own `usecases/<pack>/semantic_layer.yaml` — read by `engine/`, never from
+env. Set exactly one form under the `snowflake:` block (if both are set, the **view wins**):
 
-| You have… | Set in `.env` | REST field used |
-|---|---|---|
-| an existing **Semantic View** (native object) | `CORTEX_SEMANTIC_VIEW=MY_DB.MY_SCHEMA.MY_VIEW` | `semantic_view` |
-| a semantic model **YAML on a stage** | `CORTEX_SEMANTIC_MODEL=@MY_DB.MY_SCHEMA.MY_STAGE/model.yaml` | `semantic_model_file` |
+```yaml
+# usecases/<pack>/semantic_layer.yaml
+snowflake:
+  view: MY_DB.MY_SCHEMA.MY_VIEW                          # a native Semantic View  -> REST field semantic_view
+  # model_file: "@MY_DB.MY_SCHEMA.MY_STAGE/model.yaml"   # OR a stage YAML         -> REST field semantic_model_file
+```
 
 > **Find your Semantic Views:** in Snowsight run `SHOW SEMANTIC VIEWS;` (or look under
 > *AI & ML → Cortex Analyst*). Use the fully-qualified `DB.SCHEMA.NAME`.
+>
+> **Test-only override:** to point a *local run* at a DIFFERENT layer than the pack declares (or to
+> give a demo pack that ships no `semantic_layer.yaml`, e.g. `dq_qals`, a view), set
+> `CORTEX_SEMANTIC_VIEW` (or `CORTEX_SEMANTIC_MODEL`) in `.env`. These are read ONLY by the runner
+> scripts (`run_local.py` / `run_evals.py` / `chat_local.py`), never by `engine/`. Leave them unset
+> to use the pack's own `semantic_layer.yaml`.
 >
 > **Caveat (decision #2 in `CLAUDE.md`):** a Snowflake Semantic View does **not** port to
 > Databricks — its Metric Views are a different, native format. Pointing at an existing view
@@ -103,7 +111,9 @@ SNOWFLAKE_WAREHOUSE=YOUR_WH                   # runs COMPLETE + the Analyst-gene
 SNOWFLAKE_DATABASE=YOUR_DB
 SNOWFLAKE_SCHEMA=YOUR_SCHEMA
 
-# Semantic layer -- pick ONE (see §2):
+# Semantic layer: an AI+BI pack declares it in usecases/<pack>/semantic_layer.yaml (see §2).
+# The vars below are an OPTIONAL TEST-ONLY override -- used to point a demo pack (e.g. dq_qals, which
+# ships no semantic_layer.yaml) at a view. Leave unset for packs that declare their own:
 CORTEX_SEMANTIC_VIEW=MY_DB.MY_SCHEMA.MY_VIEW
 # CORTEX_SEMANTIC_MODEL=@MY_DB.MY_SCHEMA.MY_STAGE/model.yaml
 
@@ -137,17 +147,27 @@ py -3 run_local.py dq_qals
 Now the loop calls Cortex Analyst (REST) to turn the question into SQL against **your Semantic
 View**, runs that SQL on your warehouse, and answers from the **real rows**.
 
-### Try your own question / the offline eval gate
+### Ask your own question, or chat interactively
 
 ```powershell
-py -3 run_local.py inventory_balance "Which 5 items have the most stock?"   # one-shot question
+py -3 run_local.py inventory_balance "Which 5 items have the most stock?"   # one-shot: your question
 py -3 chat_local.py inventory_balance                                        # interactive: ask in a loop
-py -3 run_evals.py dq_qals      # runs the pack's golden questions through the full loop
+py -3 run_evals.py dq_qals                                                   # offline golden-set gate
 ```
 
-`chat_local.py` builds the graph once and lets you keep asking questions (blank line / `exit` /
-Ctrl-D to quit). Each question is an independent run (no memory of the previous one). Like
-`run_local.py` / `run_evals.py`, it's a **runner script** — it never modifies `engine/` or source.
+**`chat_local.py` — interactive REPL.** Build the graph once, then keep asking:
+
+```powershell
+py -3 chat_local.py                                # default pack (dq_qals, or $USE_CASE)
+py -3 chat_local.py inventory_balance              # a specific pack
+$env:USE_CASE="goa_spend"; py -3 chat_local.py     # pick the pack via env instead of an arg
+```
+
+Type questions at the `you>` prompt; leave with a blank line, `exit`, `quit`, or Ctrl-C / Ctrl-D.
+Provider / model / SQL tool come from `.env` (same as `run_local.py`); the graph is built ONCE and
+reused, so a Cortex session opens once, not per question. Each question is an INDEPENDENT run (no
+multi-turn memory). Like `run_local.py` / `run_evals.py`, it's a **runner script** — it never modifies
+`engine/` or source.
 
 ### What breaks (and the fix)
 
@@ -156,7 +176,7 @@ Ctrl-D to quit). Each question is an independent run (no memory of the previous 
 | `No Snowflake token…` | `SQL_TOOL=cortex` but no `SNOWFLAKE_PAT` (+`SNOWFLAKE_HOST`). Add them. |
 | `KeyError: 'SNOWFLAKE_PAT'` (or account/user) | a required value is missing from `.env` — `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PAT`. |
 | session auth error (invalid password/token) | the PAT is wrong/expired or not scoped to `SNOWFLAKE_ROLE`. Regenerate it. |
-| `SQL_TOOL=cortex needs a semantic layer…` | set `CORTEX_SEMANTIC_VIEW` **or** `CORTEX_SEMANTIC_MODEL`. |
+| `…pack declares no semantic layer` (or `needs a snowflake: semantic layer`) | the pack has no `usecases/<pack>/semantic_layer.yaml` (or no `snowflake:` block). Add one, or set the `CORTEX_SEMANTIC_VIEW` / `CORTEX_SEMANTIC_MODEL` test override in `.env`. |
 | HTTP **401/403** on the Analyst call | PAT invalid/expired, or the role lacks Cortex. Regenerate the PAT; confirm `SNOWFLAKE.CORTEX_USER`. |
 | HTTP **400** naming the semantic model/view | the view name/stage path is wrong or the role can't see it. Re-check `SHOW SEMANTIC VIEWS;`. |
 | `Unknown user-defined function SNOWFLAKE.CORTEX.COMPLETE` | your session role can't see Cortex. Grant `SNOWFLAKE.CORTEX_USER`, or set `SNOWFLAKE_SECONDARY_ROLES=all` so the session uses whichever granted role has it. |

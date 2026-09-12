@@ -23,13 +23,14 @@ except ImportError:
 from engine.graph import build_graph, initial_state, load_config
 from engine.tracing import traced_invoke
 from engine.memory import remember_run
+from runner_env import semantic_override      # TEST/DEV-only env->pack override (kept in one place)
 
 
 def main():
     use_case = sys.argv[1] if len(sys.argv) > 1 else os.getenv("USE_CASE", "dq_qals")
     cfg = load_config(use_case)
     max_score = cfg.get("max_score", 18)
-    app = build_graph(use_case, verbose=False)     # built ONCE; reused for every question
+    app = build_graph(use_case, semantic_layer=semantic_override(), verbose=False)     # built ONCE; reused for every question
     print(f"\nUSE CASE: {cfg['name']}  [{use_case}]")
     print("Ask a question. Blank line, 'exit' or 'quit' (or Ctrl-D) to leave.\n" + "-" * 68)
 

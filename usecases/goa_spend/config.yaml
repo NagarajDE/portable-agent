@@ -1,0 +1,5 @@
+# Mirrors the native Snowflake agent DBADMIN.AGENTS.GOA_SPEND_ANALYTICS_AGENT (read-only reference).
+# Semantic layer: declared in semantic_layer.yaml (this pack is AI+BI/Analyst-backed).
+inherits: [shared]
+name: "GOA indirect spend analytics"
+sample_task: "What are the top 10 vendors by spend, and what % of total does each represent?"

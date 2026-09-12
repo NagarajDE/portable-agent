@@ -51,6 +51,7 @@ shared/     COMMON conventions. inherited by every pack unless overridden.
 
 usecases/<name>/     ONE folder = ONE agent. this is what you add per use case.
   config.yaml          inherits: [shared] + name + sample_task  (a few lines)
+  semantic_layer.yaml  ONLY AI+BI/Analyst packs — the native view/model this pack queries
   prompts/generate.md  the persona — the one file that's truly per-agent
   prompts/rubric.md    ONLY if this domain needs different scoring than shared
   skills/*.md          ONLY domain-specific how-to (not reporting/safety — inherited)
@@ -59,11 +60,19 @@ usecases/<name>/     ONE folder = ONE agent. this is what you add per use case.
   fixtures.py           MOCK-only demo data; ignored once SQL_TOOL/WORKER_PROVIDER are real
 ```
 
-### Composition rules (implemented in `engine/graph.py`)
-- **skills**: `shared/skills/*.md` + `pack/skills/*.md` → CONCATENATED
-- **prompts**: `pack/prompts/<f>` if it exists, ELSE `shared/prompts/<f>` → OVERRIDE
+### Composition rules (implemented in `engine/graph.py`; full guide: `docs/concepts/use-case-pack-anatomy.md`)
+- **skills**: `shared/skills/*.md` + `pack/skills/*.md` → CONCATENATED. A pack may drop specific
+  shared skills via `exclude_shared_skills: [<stem>]` in its config (e.g. a non-SQL pack excludes
+  `sql_safety` so SELECT-only rules aren't injected).
+- **prompts**: `pack/prompts/<f>` if it exists, ELSE `shared/prompts/<f>` → OVERRIDE (by FILE
+  PRESENCE — never declared in config)
 - **config**: `shared/config.yaml` merged with `pack/config.yaml` (pack wins) via
   `inherits: [shared]`
+- **exemplars**: `pack/exemplars/*.yaml` few-shot; an optional `kind: text_to_sql | input_output`
+  picks the render format (else inferred from the presence of an `sql` key)
+- **semantic_layer**: `pack/semantic_layer.yaml` (AI+BI/Analyst packs ONLY) declares the native
+  semantic view/model; **presence marks the pack AI+BI-backed** (absent → engine never looks). Read
+  from the PACK, never env — `CORTEX_SEMANTIC_VIEW`/`_MODEL` are a test-only override in the runners.
 
 ### Adding a new agent = adding a folder, never touching `engine/` or `shared/`
 ```
@@ -71,8 +80,11 @@ usecases/my_new_agent/
   config.yaml          inherits: [shared], name, sample_task
   prompts/generate.md  persona (+ {skills}{exemplars}{data} placeholders)
   exemplars/  evals/    your tuning
+  # semantic_layer.yaml  ONLY if AI+BI/Analyst-backed (native view/model)
   # rubric.md / refine.md only if overriding shared
 ```
+Fastest start: copy `usecases/_TEMPLATE/` (a runnable mock pack). Step-by-step guide + the new-pack
+checklist: `docs/concepts/use-case-pack-anatomy.md`.
 
 ## Existing use-case packs (reference examples)
 
@@ -259,8 +271,9 @@ deletion-by-request is a plain `DELETE`.
   use the injected OAuth token at `/snowflake/session/token`; locally a SINGLE `SNOWFLAKE_PAT`
   authenticates BOTH the Snowpark session (as the password) and the Analyst REST call (bearer)
   — no `SNOWFLAKE_PASSWORD`. Needs a warehouse and a
-  semantic layer — EITHER `CORTEX_SEMANTIC_VIEW` (an existing native Semantic View) OR
-  `CORTEX_SEMANTIC_MODEL` (a stage YAML); view wins if both set. `CortexClient` uses the STRUCTURED
+  semantic layer, which the PACK declares in `semantic_layer.yaml` (`snowflake: {view | model_file}`;
+  view wins if both). `engine/` reads it from the pack, NEVER env — `CORTEX_SEMANTIC_VIEW` /
+  `CORTEX_SEMANTIC_MODEL` are only a TEST-time override applied by the runner scripts. `CortexClient` uses the STRUCTURED
   COMPLETE form (messages+options) to get `usage`, so it detects truncation via
   `completion_tokens >= max_tokens` (Cortex exposes no `finish_reason`), falling back to the plain
   string form if that call fails — never a regression. `snowpark_session()` is **memoized** — ONE

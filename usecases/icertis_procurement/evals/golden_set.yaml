@@ -1,0 +1,4 @@
+# Sample questions mirrored from the native ICERTIS_PROCUREMENT_AGENT. On the mock provider these hit
+# fixtures.py; against the live semantic view, replace expect_contains with facts you verify.
+- question: "Who are the top vendors by total active SOW contract value?"
+  expect_contains: ["Northwind"]

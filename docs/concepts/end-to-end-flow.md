@@ -133,8 +133,11 @@ never trained parameters (see [`evals-and-the-learning-flywheel.md`](evals-and-t
 | `evals/golden_set.yaml` | graded by `run_evals.py` | — | ✅ you / CI |
 | `tests/` (pytest) | verify the machinery | — | ✅ you / CI |
 
-Rule of thumb: **everything under `usecases/<pack>/` except `evals/` is live on every question.**
-`evals/` (and the repo-level `tests/`) are the safety nets you run yourself.
+Rule of thumb: **everything under `usecases/<pack>/` except `evals/` is loaded for a live question** —
+though not every load runs the same way each time: `generate.md`, `skills`, `exemplars`, and the
+evidence step run on the first draft; `rubric.md` runs on every evaluate; `refine.md` (and skills again)
+run **only when a score is below `pass_score`** and iterations remain. `evals/` (and the repo-level
+`tests/`) are the safety nets you run yourself, never on the live path.
 
 ---
 

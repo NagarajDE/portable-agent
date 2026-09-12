@@ -45,7 +45,11 @@ class SqlBridgeTool:
             with self._lock:
                 if self._inner is None:
                     from engine.sql_tool import get_sql_tool
-                    self._inner = get_sql_tool(self._use_case, self._default)
+                    from engine.graph import load_semantic_layer   # lazy: avoid graph<->tools import cycle
+                    # A `sql` tool inside a tools-pack self-declares its layer the same way the legacy
+                    # path does -- read from the PACK (usecases/<pack>/semantic_layer.yaml), never env.
+                    semantic = load_semantic_layer(self._use_case)
+                    self._inner = get_sql_tool(self._use_case, self._default, semantic)
         return self._inner
 
     @staticmethod

@@ -7,8 +7,9 @@ the network-safety contract:
   * ALLOWLIST      -- requests only to explicitly configured hosts (fail CLOSED: an empty or
                       unset allowlist denies everything; an explicit `allow_hosts: []` also denies).
   * SSRF GUARD     -- the target host must not resolve to a private / loopback / link-local /
-                      reserved / CGNAT (100.64/10) / unspecified IP; IPv4-mapped IPv6 is unwrapped;
-                      an empty DNS answer fails closed. Blocks 169.254.169.254, 127.0.0.1, 10/8, ...
+                      reserved / CGNAT (100.64/10) / IPv6 site-local (fec0::/10) / unspecified IP;
+                      IPv4-mapped IPv6 is unwrapped; an empty DNS answer fails closed. Blocks
+                      169.254.169.254, 127.0.0.1, 10/8, ...
   * REDIRECT CHECK -- redirects are followed MANUALLY (allow_redirects=False) and every hop is
                       re-validated (host allowlist + SSRF) IMMEDIATELY before the connect, on every
                       attempt -- shrinking the DNS-rebinding window. (Residual: we do not pin the
@@ -82,6 +83,8 @@ def _ip_is_blocked(ip_str: str) -> bool:
         ip = mapped
     if isinstance(ip, ipaddress.IPv4Address) and ip in _CGNAT:
         return True
+    if isinstance(ip, ipaddress.IPv6Address) and ip.is_site_local:
+        return True                                   # fec0::/10 (deprecated site-local) is NOT covered by is_private (NB5)
     return (ip.is_private or ip.is_loopback or ip.is_link_local
             or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
 
@@ -202,9 +205,10 @@ class HttpGetTool:
     def _read_body(self, resp, deadline, requests) -> bytes:
         """Read the body in small bounded chunks, checking the wall-clock deadline BETWEEN chunks so
         a slow response is cut off promptly (M14). Capped at max_bytes+1 (the extra byte lets
-        bound_output detect truncation). `raw` is accessed once (it's stateful). Residual: a single
-        blocking chunk read can still run up to the socket read-timeout; the dispatch future timeout
-        is the hard CALLER-side bound (it returns control at ctx.timeout_s regardless)."""
+        bound_output detect truncation). `raw` is accessed once (it's stateful). Residual: the socket
+        timeout is a per-read INACTIVITY timeout, not a max duration -- a slow trickle (a byte just
+        before each timeout) can keep a single blocking read alive longer than ctx.timeout_s. The
+        dispatch future timeout is the hard CALLER-side bound (it returns control at ctx.timeout_s)."""
         raw = resp.raw
         limit = self._max_bytes + 1
         buf = bytearray()
@@ -246,7 +250,9 @@ class HttpGetTool:
                                 loc = resp.headers.get("Location", "")
                                 if hops >= self._max_redirects or not loc:
                                     raise ValueError("too many redirects or missing Location")
-                                current = urljoin(current, loc)        # re-validated at top of loop
+                                # base on resp.url (the URL actually fetched, incl. applied query) so a
+                                # fragment-only Location keeps the query (NB4); re-validated at top of loop
+                                current = urljoin(resp.url, loc)
                                 params = {}                            # querystring already applied on hop 1
                                 hops += 1
                                 continue

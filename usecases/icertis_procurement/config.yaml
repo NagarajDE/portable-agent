@@ -1,0 +1,5 @@
+# Mirrors the native Snowflake agent DBADMIN.AGENTS.ICERTIS_PROCUREMENT_AGENT (read-only reference).
+# Semantic layer: declared in semantic_layer.yaml (this pack is AI+BI/Analyst-backed).
+inherits: [shared]
+name: "iCertis procurement analytics (active contracts)"
+sample_task: "Who are the top vendors by total active SOW contract value?"

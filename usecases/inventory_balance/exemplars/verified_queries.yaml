@@ -1,4 +1,7 @@
-# Verified question -> SQL pairs (few-shot hints; also the seed you'd bless as Cortex verified
-# queries). Column/table names are placeholders -- adjust to the real INVENTORY_ANALYTICS model.
-- question: "Total on-hand inventory balance by location"
-  sql: "SELECT LOCATION, SUM(ON_HAND_QTY) AS ON_HAND_BALANCE FROM INVENTORY GROUP BY LOCATION ORDER BY ON_HAND_BALANCE DESC"
+# ILLUSTRATIVE question -> SQL exemplars for the inventory pack (few-shot hints that shape the
+# worker's mental model). NOTE: unlike a schema-"verified" set, these are NOT validated against the
+# live INVENTORY_ANALYTICS columns — Cortex Analyst generates the real SQL from the semantic model.
+# They show the SHAPE of a correct answer: current-state uses the most-recent snapshot and never
+# sums across snapshots. Once you validate a query live, bless the real, schema-checked version here.
+- question: "What is the current on-hand inventory value by plant?"
+  sql: "SELECT Plant, SUM(CalculatedPlantStockValue) AS StockValue FROM INVENTORY_ANALYTICS WHERE MostRecentSnapshot = TRUE GROUP BY Plant ORDER BY StockValue DESC"

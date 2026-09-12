@@ -9,7 +9,8 @@ usecases/api_assistant pack end-to-end on the mock provider (no creds, no networ
 import pytest
 
 from engine import graph as _graph_mod
-from engine.graph import build_graph, initial_state, load_config, load_exemplars, load_tools
+from engine.graph import (build_graph, initial_state, load_config, load_exemplars,
+                          load_tools, _format_exemplar, load_semantic_layer)
 
 
 # --- minimal scripted doubles (local; mirror test_graph.py) ---------------
@@ -182,3 +183,59 @@ def test_legacy_exemplars_render_q_sql():
 def test_domain_neutral_exemplars_render_input_output():
     text = load_exemplars("api_assistant")
     assert "Input:" in text and "Output:" in text and "SQL:" not in text
+
+
+# --- #3: explicit `kind:` is a real discriminator, not filename/key guessing ----------------
+def test_exemplar_kind_text_to_sql_renders_q_sql():
+    out = _format_exemplar({"kind": "text_to_sql", "question": "Q1", "sql": "SELECT 1"})
+    assert out == "Q: Q1\nSQL: SELECT 1"
+
+
+def test_exemplar_kind_input_output_renders_input_output():
+    out = _format_exemplar({"kind": "input_output", "input": "hi", "output": "bye"})
+    assert out == "Input: hi\nOutput: bye"
+
+
+def test_exemplar_kind_overrides_key_sniffing():
+    # a `sql` key is PRESENT, but kind: input_output must win (explicit discriminator, not a guess)
+    out = _format_exemplar({"kind": "input_output", "sql": "SELECT 1",
+                            "input": "hi", "output": "bye"})
+    assert out == "Input: hi\nOutput: bye"
+
+
+def test_exemplar_without_kind_falls_back_to_key_sniffing():
+    assert _format_exemplar({"question": "Q1", "sql": "SELECT 1"}) == "Q: Q1\nSQL: SELECT 1"
+    assert _format_exemplar({"input": "hi", "output": "bye"}) == "Input: hi\nOutput: bye"
+
+
+# --- #7: a pack can opt OUT of a shared skill (non-SQL packs drop sql_safety) ----------------
+def test_exclude_shared_skills_drops_named_shared_skill():
+    from engine.graph import load_skills
+    kept = load_skills("dq_qals")                       # no exclusion -> sql_safety present
+    dropped = load_skills("dq_qals", ["sql_safety"])    # excluded -> sql_safety gone
+    assert "SELECT queries only" in kept
+    assert "SELECT queries only" not in dropped
+    assert "most important number" in dropped           # a DIFFERENT shared skill (reporting) survives
+
+
+# --- semantic layer: pack-only loader; file PRESENCE marks an AI+BI pack (never reads env) ---
+def test_load_semantic_layer_absent_returns_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(_graph_mod, "USECASES", tmp_path)
+    (tmp_path / "nolayer").mkdir()                       # a pack dir with NO semantic_layer.yaml
+    assert load_semantic_layer("nolayer") is None        # engine never looks -> non-AI+BI pack
+
+
+def test_load_semantic_layer_present_parses_block(tmp_path, monkeypatch):
+    monkeypatch.setattr(_graph_mod, "USECASES", tmp_path)
+    pack = tmp_path / "aibi"
+    pack.mkdir()
+    (pack / "semantic_layer.yaml").write_text("snowflake:\n  view: DB.S.V\n", encoding="utf-8")
+    assert load_semantic_layer("aibi") == {"snowflake": {"view": "DB.S.V"}}
+
+
+def test_load_semantic_layer_empty_file_returns_dict(tmp_path, monkeypatch):
+    monkeypatch.setattr(_graph_mod, "USECASES", tmp_path)
+    pack = tmp_path / "empty"
+    pack.mkdir()
+    (pack / "semantic_layer.yaml").write_text("", encoding="utf-8")     # present but empty
+    assert load_semantic_layer("empty") == {}            # {} -> get_sql_tool guard-rails it clearly

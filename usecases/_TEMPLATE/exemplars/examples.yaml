@@ -1,0 +1,5 @@
+# Curated few-shot demonstrations. Use kind: text_to_sql for a verified question->SQL pair, or
+# kind: input_output for a domain-neutral pair. See docs/concepts/use-case-pack-anatomy.md (section 3).
+- kind: text_to_sql
+  question: "What is the total value across items?"
+  sql: "SELECT SUM(VALUE) AS TOTAL FROM ITEMS"

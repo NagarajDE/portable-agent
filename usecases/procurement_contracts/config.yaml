@@ -1,0 +1,6 @@
+# Mirrors the native Snowflake agent DBADMIN.AGENTS.PROCUREMENT_CONTRACT_AGENT (read-only reference).
+# Native ships no instructions/sample questions; skills/rubric here are authored from the view's columns.
+# Semantic layer: declared in semantic_layer.yaml (this pack is AI+BI/Analyst-backed).
+inherits: [shared]
+name: "Procurement contract analytics (iCertis)"
+sample_task: "What is the total active contract value by supplier for the top 10 suppliers?"

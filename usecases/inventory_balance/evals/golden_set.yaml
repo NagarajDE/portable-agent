@@ -1,5 +1,8 @@
 # Portable golden questions for the inventory-balance pack. expect_contains = substrings the
 # best_answer must include (case-insensitive). These pass on the MOCK provider; when pointed at
 # the real INVENTORY_ANALYTICS view, replace with facts you can verify from live data.
+# ROBUSTNESS: expect_contains is a plain substring match, so choose tokens the model won't reformat.
+# A code like "SD-01" is safe; a raw number like 25475 fails if the answer prints it as "25,475".
+# For live data, prefer stable identifiers over formatted numbers.
 - question: "What is the total current on-hand inventory balance by location?"
   expect_contains: ["25475", "SD-01"]
