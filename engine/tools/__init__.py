@@ -27,14 +27,15 @@ from engine.tools.dispatch import (
     dispatch, ToolValidationError, ToolTimeoutError, ApprovalRequiredError,
 )
 from engine.tools.orchestrator import LoadedTool, load_tools, gather_context, describe_tools
+from engine.tools.agentic import run_agentic       # opt-in model-driven gathering (tool_mode: agentic)
 
 # Import the builtin adapters for their registration side-effect, so `known_tools()` is
 # populated on `import engine.tools`. Their heavy/vendor deps stay lazy inside run().
-from engine.tools import sql_bridge, mock_tool, http_tool  # noqa: F401,E402
+from engine.tools import sql_bridge, mock_tool, http_tool, mcp_tool  # noqa: F401,E402
 
 __all__ = [
     "ToolSpec", "ToolResult", "ToolError", "ToolContext", "Tool", "bound_output", "redact",
     "register", "build_tool", "known_tools", "UnknownToolError",
     "dispatch", "ToolValidationError", "ToolTimeoutError", "ApprovalRequiredError",
-    "LoadedTool", "load_tools", "gather_context", "describe_tools",
+    "LoadedTool", "load_tools", "gather_context", "describe_tools", "run_agentic",
 ]

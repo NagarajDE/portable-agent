@@ -23,7 +23,7 @@ from engine.llm_client import (get_llm_client, get_eval_client, model_summary,
                                 LLMClient, EmptyResponseError)
 from engine.sql_tool import get_sql_tool, SQLTool
 from engine.tracing import instrument       # observability is applied from OUTSIDE the nodes
-from engine.tools import load_tools, gather_context, describe_tools   # generic tool layer (SQL = one tool)
+from engine.tools import load_tools, gather_context, describe_tools, run_agentic   # generic tool layer (SQL = one tool)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 USECASES = REPO_ROOT / "usecases"
@@ -61,6 +61,41 @@ def load_semantic_layer(use_case: str) -> dict | None:
     return yaml.safe_load(f.read_text(encoding="utf-8")) or {}
 
 
+def _golden_questions(use_case: str) -> list[str]:
+    """The questions from a pack's evals/golden_set.yaml (accepts `question` or `input`). Used as the
+    default for sample_questions so a pack's 'try these' tracks what it's actually tested on. Best-
+    effort: a missing/unparseable file yields []."""
+    f = USECASES / use_case / "evals" / "golden_set.yaml"
+    if not f.exists():
+        return []
+    try:
+        golden = yaml.safe_load(f.read_text(encoding="utf-8")) or []
+    except Exception:
+        return []
+    out = []
+    for case in golden:
+        if isinstance(case, dict):
+            q = case.get("question") or case.get("input")
+            if q and str(q).strip():
+                out.append(str(q).strip())
+    return out
+
+
+def pack_manifest(use_case: str) -> dict:
+    """Non-secret, client-facing pack metadata: name, description, and sample questions ('try these').
+    `sample_questions` come from config `sample_questions:` when set, else default to the golden-set
+    questions (so every pack exposes samples that track what it's tested on). Pure metadata -- no loop,
+    no model, no creds -- so a UI can fetch it before the first question. Bounded to 20 samples."""
+    cfg = load_config(use_case)
+    samples = cfg.get("sample_questions") or _golden_questions(use_case)
+    samples = [str(s).strip() for s in (samples or []) if str(s).strip()][:20]
+    return {"use_case": use_case,
+            "name": cfg.get("name", use_case),
+            "description": str(cfg.get("description", "")).strip(),
+            "sample_task": str(cfg.get("sample_task", "")).strip(),
+            "sample_questions": samples}
+
+
 def _prompt(use_case: str, name: str) -> str:
     """Pack's prompt if present, else fall back to shared/ (override semantics)."""
     for base in (USECASES / use_case / "prompts", SHARED / "prompts"):
@@ -85,6 +120,36 @@ def load_skills(use_case: str, exclude_shared: list | None = None) -> str:
                     continue                           # pack opted out of this shared skill
                 files.append(f)
     return "\n\n".join(f.read_text(encoding="utf-8").strip() for f in files) if files else "None."
+
+
+def load_instructions(use_case: str, exclude: list | None = None) -> str:
+    """Operator INSTRUCTIONS -- behavioral/policy directives, composed like skills:
+    `shared/instructions/*.md` + `usecases/<pack>/instructions/*.md`, concatenated. Distinct from
+    skills (domain how-to) so an operator owns them separately and the rubric can grade adherence.
+    A pack may drop specific SHARED instruction files (by stem) via `exclude_shared_instructions:`.
+    Returns '' when there are none (existing packs -> no block, no behavior change)."""
+    drop = {str(s).strip().lower() for s in (exclude or [])}
+    shared_dir = SHARED / "instructions"
+    files = []
+    for base in (shared_dir, USECASES / use_case / "instructions"):
+        if base.exists():
+            for f in sorted(base.glob("*.md")):
+                if base == shared_dir and f.stem.lower() in drop:
+                    continue
+                files.append(f)
+    return "\n\n".join(f.read_text(encoding="utf-8").strip() for f in files)
+
+
+def _instr_block(*parts: str) -> str:
+    """Compose the OPERATOR INSTRUCTIONS block from one or more sources (pack/shared files, a
+    build-time override, a per-request runtime string). Returns '' when everything is empty, so no
+    block is injected. The single self-describing header works for BOTH the worker ('I must comply')
+    and the judge ('penalize violations')."""
+    body = "\n".join(p.strip() for p in parts if p and p.strip())
+    if not body:
+        return ""
+    return ("OPERATOR INSTRUCTIONS (authoritative — the answer MUST comply; "
+            "penalize violations):\n" + body)
 
 
 def _format_exemplar(p: dict) -> str:
@@ -121,6 +186,18 @@ def fill(template: str, **kw) -> str:
     return re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)\}",
                   lambda m: str(kw[m.group(1)]) if m.group(1) in kw else m.group(0),
                   template)
+
+
+def _fill(template: str, instructions: str = "", **kw) -> str:
+    """fill() plus operator-instruction placement: a template that contains `{instructions}` controls
+    WHERE the block goes; a template that does NOT (every existing pack) gets the block AUTO-PREPENDED
+    only when it is non-empty. So packs with no instructions render byte-for-byte as before (empty
+    block, nothing prepended) -- zero behavior change -- while an instruction-bearing pack sees the
+    block regardless of whether its author added the placeholder."""
+    out = fill(template, instructions=instructions, **kw)
+    if instructions and "{instructions}" not in template:
+        out = instructions + "\n\n" + out
+    return out
 
 
 class Verdict(BaseModel):
@@ -225,12 +302,14 @@ class State(TypedDict):
     best_feedback: str        # the critique that produced best_answer (refine builds from BEST)
     stall: int                # consecutive refines that did NOT beat best_score (no-progress stop)
     iterations: int
+    instructions: str         # per-request OPERATOR instructions (applied only if the pack allows)
     run_id: str               # per-run id; the join key for observability (see engine/tracing.py)
 
 
 def build_graph(use_case: str, llm: LLMClient | None = None,
                 sql: SQLTool | None = None, eval_llm: LLMClient | None = None,
-                semantic_layer: dict | None = None, verbose: bool = True):
+                semantic_layer: dict | None = None, instructions: str | None = None,
+                verbose: bool = True):
     cfg = load_config(use_case)
     # max_score = the rubric denominator / validation cap; pass_score = the stop threshold.
     # `threshold` is kept as the backward-compatible alias for pass_score.
@@ -241,11 +320,17 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     max_stall = cfg.get("max_stall", 2)                # stop after this many refines that DON'T beat
                                                        # best (0 = off). Guards the deterministic
                                                        # refine-from-best "grind to max_iters" case.
+    tool_mode = str(cfg.get("tool_mode", "deterministic")).strip().lower()   # deterministic | agentic
+    max_tool_steps = cfg.get("max_tool_steps", 4)      # agentic: max model-chosen tool calls per run
     for _name, _val, _min in (("max_score", max_score, 1), ("pass_score", pass_score, 1),
                               ("max_iters", max_iters, 0), ("eval_retries", eval_retries, 0),
-                              ("max_stall", max_stall, 0)):
+                              ("max_stall", max_stall, 0), ("max_tool_steps", max_tool_steps, 0)):
         if type(_val) is not int or _val < _min:       # `type is not int` also rejects bools
             raise ValueError(f"{_name} must be an integer >= {_min}")   # pass_score>=1: 0 would let a fallback-0 "pass"
+    if tool_mode not in ("deterministic", "agentic"):
+        raise ValueError("tool_mode must be 'deterministic' or 'agentic'")
+    if max_tool_steps > 10:                             # bound cost/latency of the gathering loop
+        raise ValueError("max_tool_steps must be <= 10")
     if pass_score > max_score:
         raise ValueError("pass_score must be <= max_score")
     if max_iters > 10:                                 # keep graph steps under LangGraph's default recursion limit (25)
@@ -253,11 +338,12 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     retry_nudge = (f"\n\nYour previous reply could not be parsed. Reply with EXACTLY "
                    f"one line:  SCORE: N/{max_score} - <short reason>")
 
+    cfg_models = cfg.get("models")                     # pack-level model profiles (env still wins)
     injected_llm = llm                                 # remember whether a worker was injected
-    llm = llm or get_llm_client(use_case)             # worker: generate + refine
+    llm = llm or get_llm_client(use_case, cfg_models)  # worker: generate + refine
     # judge: injected eval wins; else reuse an injected worker (so a real worker isn't paired
-    # with a mock judge); else resolve independently from env.
-    eval_llm = eval_llm or injected_llm or get_eval_client(use_case)
+    # with a mock judge); else resolve independently from env / pack models.
+    eval_llm = eval_llm or injected_llm or get_eval_client(use_case, cfg_models)
     # Generic tool layer. `load_tools` returns None when a pack declares NO `tools:` key -> we take
     # the IDENTICAL single-SQL path (existing packs unchanged). A list (even empty) means the pack
     # declared tools explicitly: `tools: []` is a deliberately TOOLLESS agent (no tools AND no SQL).
@@ -270,37 +356,54 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         semantic = semantic_layer or load_semantic_layer(use_case)
         sql = get_sql_tool(use_case, cfg.get("default_sql_tool", "mock"), semantic)
     tools_desc = describe_tools(loaded_tools or [])    # {tools} block for the persona ("None." if legacy/none)
+    if tool_mode == "agentic" and loaded_tools is None:
+        raise ValueError("tool_mode: agentic requires a `tools:` list; omit tool_mode for the SQL path")
+    # Load the act-selection prompt once, only for an agentic tools pack (else the file need not exist).
+    act_template = _prompt(use_case, "act.md") if (tool_mode == "agentic" and loaded_tools) else ""
     skills = load_skills(use_case, cfg.get("exclude_shared_skills"))
     exemplars = load_exemplars(use_case)
+    # OPERATOR INSTRUCTIONS: injected `instructions=` (DI/runner override) wins, else the pack+shared
+    # instruction files. Per-REQUEST instructions (state) are honored ONLY if the pack opts in.
+    base_instructions = (instructions if instructions is not None
+                         else load_instructions(use_case, cfg.get("exclude_shared_instructions")))
+    allow_runtime = bool(cfg.get("allow_runtime_instructions", False))
+
+    def instr_for(s: State) -> str:
+        runtime = s.get("instructions", "") if allow_runtime else ""
+        return _instr_block(base_instructions, runtime)
 
     def log(m):
         if verbose:
             print(m)
 
-    log(f"  [models]   {model_summary()}")
+    log(f"  [models]   {model_summary(cfg_models)}")
 
     def generate(s: State) -> State:
-        # Context source is DETERMINISTIC: a tools pack runs its declared READ-ONLY tools and
-        # feeds their observations in; a legacy pack makes the single SQL call, exactly as before.
-        # (The model never SELECTS a tool -> tool output can't trigger a tool call: injection-safe.)
+        # Context source. Legacy: the single SQL call (unchanged). Deterministic tools: the engine
+        # runs the declared READ-ONLY tools (model never selects -> injection-safe). Agentic tools:
+        # the model chooses which read-only tools to call (opt-in; weaker injection property), still
+        # via dispatch(). Either tools path then feeds observations into this same `generate`.
         if use_sql:
             data = sql.ask(s["task"])
+        elif tool_mode == "agentic":
+            data = run_agentic(s["task"], loaded_tools, llm, act_template,
+                               s.get("run_id", "-"), max_tool_steps)
         else:
             data = gather_context(s["task"], loaded_tools, s.get("run_id", "-"))
-        answer = llm.complete(fill(_prompt(use_case, "generate.md"),
-                                   task=s["task"], data=data, observations=data,
-                                   tools=tools_desc, skills=skills,
-                                   exemplars=exemplars, revision=0))
+        answer = llm.complete(_fill(_prompt(use_case, "generate.md"), instructions=instr_for(s),
+                                    task=s["task"], data=data, observations=data,
+                                    tools=tools_desc, skills=skills,
+                                    exemplars=exemplars, revision=0))
         log(f"  [generate] rev0 -> {answer}")
         return {**s, "data": data, "answer": answer, "iterations": 0}
 
     def evaluate(s: State) -> State:
         # Ground the judge: give it the DATA the answer must be consistent with, so a
         # fabricated number can't satisfy the rubric (the judge can check against evidence).
-        base = fill(_prompt(use_case, "rubric.md"),
-                    task=s["task"], answer=s["answer"], data=s.get("data", ""),
-                    observations=s.get("data", ""),    # {observations} = domain-neutral alias for {data}
-                    max_score=max_score)               # rubric's denominator matches the configured scale
+        base = _fill(_prompt(use_case, "rubric.md"), instructions=instr_for(s),
+                     task=s["task"], answer=s["answer"], data=s.get("data", ""),
+                     observations=s.get("data", ""),    # {observations} = domain-neutral alias for {data}
+                     max_score=max_score)               # rubric's denominator matches the configured scale
         verdict: Verdict | None = None
         for attempt in range(eval_retries + 1):
             prompt = base if attempt == 0 else base + retry_nudge
@@ -340,10 +443,10 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         base_answer = s.get("best_answer") or s["answer"]
         base_feedback = s.get("best_feedback") or s["feedback"]
         try:
-            answer = llm.complete(fill(_prompt(use_case, "refine.md"),
-                                       task=s["task"], answer=base_answer, data=s.get("data", ""),
-                                       observations=s.get("data", ""),   # domain-neutral alias
-                                       feedback=base_feedback, skills=skills, revision=nxt))
+            answer = llm.complete(_fill(_prompt(use_case, "refine.md"), instructions=instr_for(s),
+                                        task=s["task"], answer=base_answer, data=s.get("data", ""),
+                                        observations=s.get("data", ""),   # domain-neutral alias
+                                        feedback=base_feedback, skills=skills, revision=nxt))
         except (RuntimeError, EmptyResponseError) as e:
             # A failed REFINEMENT is non-fatal: we already have a scored best_answer, so keep it and
             # end the loop instead of throwing away good work with a 500 (Bug 1). (A failure on the
@@ -373,7 +476,8 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     return g.compile()
 
 
-def initial_state(task: str) -> State:
+def initial_state(task: str, instructions: str = "") -> State:
     return {"task": task, "data": "", "answer": "", "feedback": "",
             "score": -1, "best_answer": "", "best_score": -1, "best_feedback": "",
-            "stall": 0, "iterations": 0, "run_id": uuid.uuid4().hex[:12]}
+            "stall": 0, "iterations": 0, "instructions": instructions or "",
+            "run_id": uuid.uuid4().hex[:12]}

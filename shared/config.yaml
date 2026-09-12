@@ -8,6 +8,13 @@ max_iters: 4
 eval_retries: 1        # extra judge re-asks if its verdict can't be parsed (total tries = 1 + this)
 default_sql_tool: mock
 
+# OPERATOR INSTRUCTIONS (optional, additive). Behavioral/policy directives the answer must follow,
+# owned by the operator and composed like skills: shared/instructions/*.md + pack/instructions/*.md.
+# The worker follows them; the judge penalizes violations. A pack with no instruction files gets no
+# block (identical to before). Keys a pack may set:
+#   exclude_shared_instructions: [<stem>]   # drop a shared instruction file, like exclude_shared_skills
+#   allow_runtime_instructions: false       # accept a per-request `instructions` field (trust gate; off)
+
 # OPTIONAL generic tool layer (additive; omit for legacy single-SQL packs).
 # A pack may declare one or more named tools; the engine runs the READ-ONLY ones up front and
 # feeds their observations into `generate`. SQL is just one tool type (see engine/tools/).

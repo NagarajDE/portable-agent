@@ -167,6 +167,11 @@ Real cost of a new agent: one persona paragraph + its own tuning.
     → only Cortex Analyst / Genie (AI-BI) need a Semantic View / Metric View. Non-BI use cases wire a
     different `SQLTool` (fixed SQL, retrieval) or none, and are strictly MORE portable (nothing to
     rebuild per platform). (See §12.18.)
+19. **Generic tool layer + four additive capabilities** → SQL is ONE tool category behind a generic
+    Tool/dispatch layer (`engine/tools/`); plus (a) operator INSTRUCTIONS as a first-class, gradeable
+    layer, (b) SAMPLE QUESTIONS via `pack_manifest`, (c) LiteLLM ADOPTED as the AI gateway (one adapter;
+    routing/fallback is LiteLLM's, not ours — like LangGraph is the loop), (d) an OPT-IN AGENTIC
+    tool loop + MCP source. All additive/opt-in, zero-break, memory-independent. (See §12.20.)
 
 ---
 
@@ -758,3 +763,38 @@ Readable write-ups added under `docs/concepts/` this arc:
 - `the-refine-loop.md` — refine-from-best, `max_stall`, non-fatal refine, `max_score` vs `pass_score`.
 - `access-control.md` — invoke-access vs data-access, service-role today, caller-identity RLS end goal.
 Plus `docs/run-locally-windows.md` (Windows-first live-run guide). All linked from `README.md`.
+
+### 12.20 Generic tool layer + four capabilities (implemented, zero-break)
+
+The agent generalized from SQL-only to any-tool, plus four additive capabilities from the design spec
+`docs/design/four-capabilities.md`. All opt-in, memory-independent, and non-breaking (tests 207 → 234).
+
+- **Generic tool layer (`engine/tools/`).** SQL is ONE tool category. `base` (typed contracts +
+  redaction), `dispatch` (the trust boundary: validate → approval-gate → timeout → normalize →
+  redact/bound → one log line; never raises), `registry`, `orchestrator` (deterministic read-only
+  run), adapters `sql_bridge | mock | http | mcp` + `agentic`. Routing in `graph.py`: `tools:` absent
+  → legacy SQL path; `tools: []` → toolless; a list → those tools. Per-pack `semantic_layer.yaml`
+  declares the AI-BI semantic layer (read from the pack, never env; env is a runner test-override).
+- **#1 Instructions (`load_instructions` / `_instr_block` / `_fill`).** Operator behavioral directives
+  composed like skills (`shared/instructions/*` + `pack/instructions/*`, `exclude_shared_instructions`),
+  injected into generate/refine/rubric, gradeable. `{instructions}` controls placement else
+  auto-prepend-when-nonempty → existing packs byte-for-byte unchanged. Tier-1/operator-trust; per-request
+  `instructions` gated by `allow_runtime_instructions` (off). Shells thread it; engine gates it.
+- **#3 Sample questions (`pack_manifest`).** `{name, description, sample_questions}`; `sample_questions:`
+  in config else defaults to the golden-set questions. Snowflake `GET /manifest`; Databricks
+  `"__manifest__"` request.
+- **#4 AI gateway = LiteLLM adopted as a dependency** (Decision #19). `LiteLLMClient` (provider
+  `litellm`) — one adapter, model-string routing; SDK in-process (default) or a proxy via
+  `LITELLM_BASE_URL`. Pack `models:` profiles are DEFAULTS; env wins (env > pack > default). Cortex
+  stays native (shared Snowpark session); `DatabricksClient` superseded (back-compat).
+- **#2 Agentic tools + MCP (`engine/tools/agentic.py`, `shared/prompts/act.md`).** Opt-in
+  `tool_mode: agentic` + `max_tool_steps`: a bounded, model-driven READ-ONLY gathering loop with
+  prompt-based JSON tool-calls (NO `LLMClient` change), every call via `dispatch()`, writes never
+  auto-run; feeds observations into `generate`. Documented trade-off: weaker injection-safety than the
+  deterministic path. `type: mcp` exposes an MCP-server tool as a `Tool` (read_only fail-closed; live
+  call lazy + untested, like Genie). Example pack: `usecases/incident_triage/` (agentic; catalog +
+  http-health + deploys, mock/no-creds) — contrast `usecases/api_assistant/` (deterministic tools).
+- **Deferred (memory seams noted):** sample_questions ← promoted from logged questions; instructions ←
+  remembered user preferences; per-user model routing; native function-calling (portable via a
+  gateway); MCP server auto-discovery; write-tool auto-approval. Docs: `instructions.md`,
+  `ai-gateway.md`, `tools-and-agents.md` §9.

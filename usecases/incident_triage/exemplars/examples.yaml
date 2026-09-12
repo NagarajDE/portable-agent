@@ -1,0 +1,4 @@
+# Few-shot input -> output exemplars (non-SQL: kind inferred as input_output from the absence of `sql`).
+# They show the SHAPE of a good triage summary, not verified queries.
+- input: "Why is checkout-api slow, and who owns it?"
+  output: "checkout-api (owned by team-checkout) went degraded right after its latest deploy — likely a bad rollout. Next: page team-checkout and consider rolling back the most recent version."

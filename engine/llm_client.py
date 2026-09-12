@@ -152,8 +152,42 @@ class CortexClient:
         return text
 
 
+class LiteLLMClient:
+    """The adopted AI GATEWAY -- a dependency we build on, exactly as LangGraph is the adopted loop
+    engine. ONE adapter reaches every provider LiteLLM supports, chosen by the MODEL STRING
+    (e.g. 'anthropic/claude-sonnet-4-5', 'databricks/<serving-endpoint>', 'openai/gpt-4o',
+    'azure/...', 'bedrock/...'). We do NOT build routing/fallback/rate-limiting/key-management --
+    that is LiteLLM's job: in-process via the SDK (default), or set LITELLM_BASE_URL to a LiteLLM
+    Proxy / Databricks AI Gateway for central governance (same adapter, no code change). Provider API
+    keys come from the standard env vars LiteLLM already reads. `litellm` is imported lazily so the
+    mock path never needs it installed."""
+    def __init__(self, model: str | None = None):
+        self._model = model or os.getenv("LITELLM_MODEL")
+        if not self._model:
+            raise ValueError("litellm provider needs a model string -- set WORKER_MODEL / EVAL_MODEL "
+                             "(or LITELLM_MODEL), e.g. 'anthropic/claude-sonnet-4-5'")
+        self._base_url = (os.getenv("LITELLM_BASE_URL") or "").strip() or None  # -> a proxy / gateway
+
+    def complete(self, prompt: str, **kw) -> str:
+        import litellm
+        r = litellm.completion(
+            model=self._model, messages=[{"role": "user", "content": prompt}],
+            max_tokens=_max_tokens(), api_base=self._base_url, num_retries=2, timeout=60)
+        choice = r.choices[0] if getattr(r, "choices", None) else None
+        if choice is not None and getattr(choice, "finish_reason", None) == "length":
+            raise RuntimeError("LiteLLM output truncated (finish_reason=length); raise LLM_MAX_TOKENS")
+        msg = getattr(choice, "message", None) if choice is not None else None
+        text = getattr(msg, "content", None) if msg is not None else None
+        if not text or not str(text).strip():
+            raise EmptyResponseError("LiteLLM returned no text content")
+        return str(text)
+
+
 class DatabricksClient:
-    """Databricks Foundation Model API (OpenAI-compatible serving endpoint)."""
+    """Databricks Foundation Model API (OpenAI-compatible serving endpoint).
+    NOTE: superseded by the `litellm` provider -- prefer `provider: litellm, model:
+    databricks/<endpoint>` (one gateway for all providers). Kept for back-compat with existing
+    `WORKER_PROVIDER=databricks` configs; no new features go here."""
     def __init__(self, model: str | None = None):
         from urllib.parse import urlsplit
         from openai import OpenAI
@@ -284,7 +318,8 @@ def snowflake_bearer_headers() -> dict:
 # The only place provider names are mentioned.
 _PROVIDERS = {"anthropic": AnthropicClient,
               "cortex": CortexClient,
-              "databricks": DatabricksClient}
+              "databricks": DatabricksClient,   # back-compat; prefer 'litellm' + 'databricks/<endpoint>'
+              "litellm": LiteLLMClient}          # the adopted AI gateway (all non-Cortex providers)
 
 
 def _build(provider: str, use_case: str | None, model: str | None) -> LLMClient:
@@ -303,36 +338,44 @@ def _resolve(val: str | None, default):
     return val.strip()
 
 
-def get_llm_client(use_case: str | None = None) -> LLMClient:
-    """The WORKER: generates and refines. Selected by provider + model:
-        WORKER_PROVIDER   worker provider   (auto -> mock)
-        WORKER_MODEL      worker model      (auto -> that provider's default)
-    """
-    provider = _resolve(os.getenv("WORKER_PROVIDER"), "mock")
-    return _build(provider, use_case, _resolve(os.getenv("WORKER_MODEL"), None))
+def _profile(cfg_models, role: str) -> tuple:
+    """(provider, model) from a pack's config `models:` block for 'worker'|'evaluator', or
+    (None, None) if unset. These are DEFAULTS -- env still wins (see precedence below)."""
+    if not isinstance(cfg_models, dict):
+        return (None, None)
+    p = cfg_models.get(role)
+    if not isinstance(p, dict):
+        return (None, None)
+    return (p.get("provider"), p.get("model"))
 
 
-def get_eval_client(use_case: str | None = None) -> LLMClient:
-    """The EVALUATOR: scores against the rubric. Judge independence is CONFIGURABLE, not
-    automatic. Defaults: EVAL_PROVIDER 'auto' -> the WORKER's provider; EVAL_MODEL 'auto' ->
-    that provider's default model (NOT necessarily a pinned WORKER_MODEL). So with everything
-    'auto' the judge shares the worker's provider (and its model too, when WORKER_MODEL is
-    also 'auto') -- i.e. the worker grades its own output. Set EVAL_PROVIDER / EVAL_MODEL to
-    a different model for a genuinely independent judge:
-        EVAL_PROVIDER   evaluator provider   (auto -> same as WORKER_PROVIDER)
-        EVAL_MODEL      evaluator model      (auto -> that provider's default)
-    Lets you judge with a different model on the SAME provider, or a different
-    provider entirely.
-    """
-    worker_provider = _resolve(os.getenv("WORKER_PROVIDER"), "mock")
-    provider = _resolve(os.getenv("EVAL_PROVIDER"), worker_provider)
-    return _build(provider, use_case, _resolve(os.getenv("EVAL_MODEL"), None))
+# Precedence per role:  env (WORKER_PROVIDER/MODEL ...) > pack config `models:` > built-in default.
+# Env-wins preserves the "flip provider on migration with one env var" story; the pack `models:`
+# block just gives sensible per-pack defaults.
+def get_llm_client(use_case: str | None = None, cfg_models=None) -> LLMClient:
+    """The WORKER: generates and refines. Provider+model from env > pack `models.worker` > default."""
+    cp, cm = _profile(cfg_models, "worker")
+    provider = _resolve(os.getenv("WORKER_PROVIDER"), cp or "mock")
+    return _build(provider, use_case, _resolve(os.getenv("WORKER_MODEL"), cm))
 
 
-def model_summary() -> str:
-    """One-line resolved worker/evaluator selection, for the build log."""
-    wp = _resolve(os.getenv("WORKER_PROVIDER"), "mock")
-    ep = _resolve(os.getenv("EVAL_PROVIDER"), wp)
-    wm = _resolve(os.getenv("WORKER_MODEL"), "auto")
-    em = _resolve(os.getenv("EVAL_MODEL"), "auto")
+def get_eval_client(use_case: str | None = None, cfg_models=None) -> LLMClient:
+    """The EVALUATOR: scores against the rubric. Judge independence is CONFIGURABLE. Provider+model
+    from env > pack `models.evaluator` > (evaluator provider defaults to the worker's). Set a
+    different model/provider for a genuinely independent judge (a model shouldn't grade its own work)."""
+    wcp, _ = _profile(cfg_models, "worker")
+    ecp, ecm = _profile(cfg_models, "evaluator")
+    worker_provider = _resolve(os.getenv("WORKER_PROVIDER"), wcp or "mock")
+    provider = _resolve(os.getenv("EVAL_PROVIDER"), ecp or worker_provider)
+    return _build(provider, use_case, _resolve(os.getenv("EVAL_MODEL"), ecm))
+
+
+def model_summary(cfg_models=None) -> str:
+    """One-line resolved worker/evaluator selection, for the build log (same precedence as above)."""
+    wcp, wcm = _profile(cfg_models, "worker")
+    ecp, ecm = _profile(cfg_models, "evaluator")
+    wp = _resolve(os.getenv("WORKER_PROVIDER"), wcp or "mock")
+    ep = _resolve(os.getenv("EVAL_PROVIDER"), ecp or wp)
+    wm = _resolve(os.getenv("WORKER_MODEL"), wcm or "auto")
+    em = _resolve(os.getenv("EVAL_MODEL"), ecm or "auto")
     return f"worker={wp}:{wm}  evaluator={ep}:{em}"

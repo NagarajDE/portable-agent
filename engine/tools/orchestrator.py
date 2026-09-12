@@ -35,7 +35,7 @@ class LoadedTool:
 def _ensure_builtins() -> None:
     """Import the builtin adapters so they self-register. Import-only (their heavy/vendor
     deps stay lazy inside run()), and idempotent."""
-    from engine.tools import sql_bridge, mock_tool, http_tool  # noqa: F401
+    from engine.tools import sql_bridge, mock_tool, http_tool, mcp_tool  # noqa: F401
 
 
 def load_tools(use_case: str | None, cfg: dict) -> list[LoadedTool] | None:

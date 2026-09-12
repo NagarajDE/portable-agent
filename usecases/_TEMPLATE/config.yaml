@@ -2,7 +2,15 @@
 # See docs/concepts/use-case-pack-anatomy.md for what each file is + the new-pack checklist.
 inherits: [shared]
 name: "TEMPLATE agent (copy me)"
+description: "One line describing what this agent does (shown to clients via the manifest)."
 sample_task: "What is the total value across items?"
+
+# OPTIONAL 'try these' questions a client/UI shows before the first question (GET /manifest on
+# Snowflake, or the "__manifest__" request on Databricks). Omit this and they DEFAULT to your
+# evals/golden_set.yaml questions, so they track what the pack is actually tested on.
+# sample_questions:
+#   - "What is the total value across items?"
+#   - "Which item has the highest value?"
 
 # This template is a single-SQL agent (no `tools:` key -> legacy SQL path). For a NON-SQL agent,
 # declare tools: here and add  exclude_shared_skills: [sql_safety]  so SQL rules aren't injected.

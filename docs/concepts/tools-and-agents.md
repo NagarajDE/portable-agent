@@ -195,9 +195,46 @@ mode; runs on the mock provider with `python run_evals.py api_assistant`).
 
 ---
 
+## 9. Agentic mode (opt-in) + MCP
+
+By default the model does **not** pick tools (§2 — injection-safe). A pack can opt into an **agentic**
+gathering loop where it does:
+
+```yaml
+tool_mode: agentic        # deterministic (default) | agentic
+max_tool_steps: 4         # cap on model-chosen tool calls per run (<= 10)
+tools: [ ... ]            # required for agentic
+```
+
+How it works (`engine/tools/agentic.py`, prompt `shared/prompts/act.md`): the model emits ONE JSON
+object per step — `{"tool": "<name>", "input": {...}}` or `{"final": true}` — in **text** (no
+`LLMClient` Protocol change, so it works on any provider and the mock). The engine dispatches each
+choice through the **same `dispatch()`** and feeds observations back; when the model finalizes (or the
+step budget is hit), the normal `generate` node writes the answer from the accumulated evidence.
+`evaluate`/`refine` are unchanged; refine does not re-gather.
+
+Safety (bounded + fail-closed): **read-only tools only** (`ctx.approved=False` — a write returns an
+"approval required" observation, never runs), identical calls de-duplicated, worker errors during
+gathering are non-fatal, everything still validated/timed/redacted/bounded by `dispatch()`, and http
+stays allowlisted. **Trade-off (documented):** once the model selects tools from observations, tool
+output *can* influence later selection — weaker than the deterministic path's injection-safety. Opt in
+deliberately.
+
+**MCP** is just another tool source: `type: mcp` (`engine/tools/mcp_tool.py`) exposes one MCP-server
+tool as a `Tool` behind the same `ToolSpec` + `dispatch()`. `read_only` defaults **False**
+(fail-closed) unless the pack sets `read_only: true`. The `mcp` SDK is imported lazily; the live call
+is untested here (like Genie), but its safety is enforced regardless because it goes through dispatch.
+```yaml
+tools:
+  - type: mcp
+    name: jira
+    params: { tool: get_issue, command: "npx -y @modelcontextprotocol/server-jira", read_only: true }
+```
+
 ## See also
-- [`engine/tools/`](../../engine/tools/) — `base` · `registry` · `dispatch` · `orchestrator` · the three adapters.
-- [`usecases/api_assistant/`](../../usecases/api_assistant/) — the generic, non-SQL example pack.
+- [`engine/tools/`](../../engine/tools/) — `base` · `registry` · `dispatch` · `orchestrator` · `agentic` · adapters (sql/mock/http/mcp).
+- [`usecases/api_assistant/`](../../usecases/api_assistant/) — the generic, non-SQL example pack (deterministic tools).
+- [`usecases/incident_triage/`](../../usecases/incident_triage/) — the **agentic** example pack (`tool_mode: agentic`; the model chooses read-only tools).
 - [`the-refine-loop.md`](the-refine-loop.md) — the loop the observations feed into.
 - [`access-control.md`](access-control.md) — invoke access vs. the identity reads run as.
 - [`CLAUDE.md`](../../CLAUDE.md) — the tool-layer invariants (don't let config upgrade `read_only`; keep vendor SDKs lazy).

@@ -1,0 +1,46 @@
+inherits: [shared]
+name: "Incident triage assistant (agentic tools example)"
+description: "Given an incident question, the MODEL chooses which read-only tools to call (service
+  catalog, health endpoint, recent deploys), then explains the likely cause and the owning team."
+sample_task: "Why might orders-api be failing, and who owns it?"
+sample_questions:
+  - "Why might orders-api be failing, and who owns it?"
+  - "Is orders-api affected by a recent deploy?"
+
+# Non-SQL agent -> drop the SQL-only shared skill so SELECT rules aren't injected.
+exclude_shared_skills: [sql_safety]
+
+# AGENTIC tools (the distinguishing feature of this pack): the model decides which READ-ONLY tools to
+# call, up to max_tool_steps, each via dispatch(); their observations feed `generate`. Contrast with
+# api_assistant, which runs its tools DETERMINISTICALLY. Runs with NO creds/network (mock + http-mock).
+# NOTE: on the MOCK provider the worker can't emit JSON tool-calls, so gathering is skipped and the
+# canned answer is used -- point WORKER_PROVIDER at a real model (e.g. litellm) to see tools fire.
+tool_mode: agentic
+max_tool_steps: 4
+tools:
+  - type: mock
+    name: catalog
+    params:
+      description: "Service catalog: owner + tier for a service. Input {\"query\": \"<service or text>\"}."
+      output: |
+        SERVICE     | OWNER            | TIER
+        orders-api  | team-fulfillment | 1
+        billing-api | team-payments    | 1
+  - type: http
+    name: health
+    params:
+      description: "Service health via HTTP GET. Input {\"path\": \"/health/<service>\"}."
+      mode: mock
+      base_url: "https://api.internal.example.com"
+      allow_hosts: ["api.internal.example.com"]
+      mock_responses:
+        "/health/orders-api": '{"service":"orders-api","status":"degraded","open_incidents":1}'
+        "/health/billing-api": '{"service":"billing-api","status":"healthy","open_incidents":0}'
+  - type: mock
+    name: deploys
+    params:
+      description: "Recent deploys per service, most recent first. Input {\"query\": \"<service>\"}."
+      output: |
+        SERVICE     | VERSION | WHEN
+        orders-api  | v2.4.1  | 12m ago
+        orders-api  | v2.4.0  | 3d ago

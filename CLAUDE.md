@@ -95,6 +95,7 @@ checklist: `docs/concepts/use-case-pack-anatomy.md`.
 | `anomaly_rca` | why did it change? | hypothesis quality · evidence & isolation · actionable conclusion |
 | `parity_hana_snowflake` | cross-engine parity | overrides the shared rubric (demonstrates override, not inherit) |
 | `api_assistant` | generic **non-SQL** example | demonstrates the tool layer: a mock catalog + the generic http tool (mock mode); no creds, no network |
+| `incident_triage` | **agentic** tools example | `tool_mode: agentic` — the MODEL chooses which read-only tools to call (catalog · http health · deploys), then triages; mock/no-creds (point at a real model to see tools fire) |
 
 ## Hard-won decisions from design discussion (don't re-derive these)
 
@@ -281,9 +282,15 @@ deletion-by-request is a plain `DELETE`.
   statements serially, so it's single-flight per process (fine at low concurrency; pool per-thread
   for high concurrency). Verified: imports stay lazy (mock path untouched),
   row formatter + auth-error paths unit-tested; the live call is untested here (no account).
-- **Databricks/Genie are STILL STUBBED**: `DatabricksClient` / `GenieTool` have the SDK
-  shape + a `TODO`. Wire like Cortex, and test with `SQL_TOOL=mock` first to isolate the
-  LLM path from the SQL path.
+- **LiteLLM is the ADOPTED AI GATEWAY** (like LangGraph is the adopted loop): `LiteLLMClient`
+  (provider `litellm`) is ONE adapter reaching every provider via the model string
+  (`anthropic/…`, `databricks/<endpoint>`, `openai/…`, `azure/…`, `bedrock/…`). We do NOT build
+  routing/fallback — that's LiteLLM's, in-process (SDK, default) or a proxy via `LITELLM_BASE_URL`
+  (LiteLLM Proxy / Databricks AI Gateway). `litellm` is lazy-imported (mock path unaffected). Prefer
+  it for all non-Cortex models; `DatabricksClient` is superseded (back-compat only). See
+  `docs/concepts/ai-gateway.md`.
+- **Genie is STILL STUBBED**: `GenieTool` has the SDK shape + a `TODO`. Wire like Cortex, and test
+  with `SQL_TOOL=mock` first to isolate the LLM path from the SQL path.
 
 ## Deploying on Databricks
 
@@ -420,3 +427,21 @@ in sync with `git status`.
   (real thresholds, real table/column names) over generic placeholders — the
   shipped rubrics here are realistic starting points, not tuned to any one
   company's definitions.
+- **Operator INSTRUCTIONS are a first-class layer** (`load_instructions`, composed like skills from
+  `shared/instructions/*.md` + `pack/instructions/*.md`; `exclude_shared_instructions:` opt-out).
+  Injected into generate/refine/rubric via `_fill()`: a prompt with `{instructions}` controls
+  placement, else the block is AUTO-PREPENDED only when non-empty — so packs with no instruction
+  files are byte-for-byte unchanged. Tier-1/operator-trust: never promote user text here. Per-request
+  `instructions` are OFF unless `allow_runtime_instructions: true`. See `docs/concepts/instructions.md`.
+- **Sample questions / manifest:** `pack_manifest(use_case)` returns `{name, description,
+  sample_questions}`; `sample_questions:` in config, else defaults to the golden-set questions.
+  Exposed at Snowflake `GET /manifest` and the Databricks `"__manifest__"` request. Non-secret.
+- **Model profiles:** a pack may set `models: {worker/evaluator: {provider, model}}` as DEFAULTS;
+  **env still wins** (precedence env > pack `models:` > built-in default), preserving the one-env-var
+  migration flip. `get_llm_client`/`get_eval_client` take `cfg_models`.
+- **Agentic tools (opt-in) + MCP:** `tool_mode: agentic` (default `deterministic`) enables a bounded,
+  model-driven READ-ONLY gathering loop (`engine/tools/agentic.py`, prompt `shared/prompts/act.md`,
+  `max_tool_steps` <= 10) — prompt-based JSON tool-calls (NO `LLMClient` change), every call still via
+  `dispatch()`, writes never auto-run. It weakens the deterministic path's injection-safety (documented
+  trade-off). `type: mcp` (`engine/tools/mcp_tool.py`) exposes an MCP-server tool as a `Tool`,
+  `read_only` fail-closed; live call lazy + untested. See `docs/concepts/tools-and-agents.md` §9.

@@ -1,0 +1,7 @@
+# Portable golden set. On MOCK the canned answer is scored (tools don't fire), so these tokens are
+# chosen to match the canned refined answer; with a real model, replace with facts you can verify.
+# expect_contains: case-insensitive substrings the best_answer must include.
+- input: "Why might orders-api be failing, and who owns it?"
+  expect_contains: ["orders-api", "team-fulfillment"]
+- input: "Is orders-api affected by a recent deploy?"
+  expect_contains: ["v2.4.1"]

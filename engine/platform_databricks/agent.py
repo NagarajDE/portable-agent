@@ -30,9 +30,13 @@ from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse
 from mlflow.models import set_model
 
-from engine.graph import build_graph, initial_state
+import json
+
+from engine.graph import build_graph, initial_state, pack_manifest
 from engine.memory import remember_run
 from engine.tracing import traced_invoke
+
+MANIFEST_SENTINEL = "__manifest__"   # a client sends this as the user text to fetch pack metadata
 
 
 def _last_user_text(request: ResponsesAgentRequest) -> str:
@@ -63,7 +67,16 @@ class PortableAgent(ResponsesAgent):
         task = _last_user_text(request)
         if not task:
             raise ValueError("A non-empty user text message is required")
-        final = traced_invoke(self.app, initial_state(task), self.use_case)
+        if task == MANIFEST_SENTINEL:                    # metadata request (no GET endpoint here):
+            man = pack_manifest(self.use_case)           # name + description + sample questions
+            return ResponsesAgentResponse(
+                output=[self.create_text_output_item(json.dumps(man), id="manifest")],
+                custom_outputs=man)
+        # OPTIONAL per-request OPERATOR instructions via custom_inputs; honored only if the pack
+        # sets allow_runtime_instructions (engine gates it). Defensive read (custom_inputs may be absent).
+        ci = getattr(request, "custom_inputs", None) or {}
+        instr = str(ci.get("instructions", "")) if isinstance(ci, dict) else ""
+        final = traced_invoke(self.app, initial_state(task, instr), self.use_case)
         remember_run(final, self.use_case)               # episodic capture (best-effort, no-op unless MEMORY_STORE set)
         # Use the typed Responses output item (not a raw dict) so downstream MLflow/serving
         # clients get a spec-compliant response.

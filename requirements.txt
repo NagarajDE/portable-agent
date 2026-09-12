@@ -3,10 +3,15 @@ langgraph
 pyyaml
 pydantic                     # typed, validated judge verdict (comes with langgraph too)
 
-# --- real providers: install only the ones you use ---
-anthropic                    # WORKER_PROVIDER=anthropic
-snowflake-snowpark-python    # WORKER_PROVIDER=cortex  / SQL_TOOL=cortex
-openai                       # WORKER_PROVIDER=databricks (OpenAI-compatible endpoint)
+# --- AI gateway (recommended for all non-Cortex models): the adopted gateway, like LangGraph is
+#     the adopted loop. One adapter reaches every provider via the model string; routing/fallback
+#     live in LiteLLM (in-process SDK, or a LiteLLM Proxy / Databricks AI Gateway via LITELLM_BASE_URL).
+litellm                      # WORKER_PROVIDER=litellm, WORKER_MODEL=anthropic/... | databricks/... | openai/...
+
+# --- real providers: install only the ones you use (or just use `litellm` above) ---
+anthropic                    # WORKER_PROVIDER=anthropic (direct; or via litellm)
+snowflake-snowpark-python    # WORKER_PROVIDER=cortex  / SQL_TOOL=cortex  (Cortex stays native)
+openai                       # WORKER_PROVIDER=databricks (OpenAI-compatible endpoint; or use litellm)
 databricks-sdk               # SQL_TOOL=genie
 
 # --- OPTIONAL local dev: auto-load a .env file so you don't export vars by hand ---

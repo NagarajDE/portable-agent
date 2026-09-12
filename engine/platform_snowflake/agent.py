@@ -19,7 +19,7 @@ import os
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel, Field, field_validator
 
-from engine.graph import build_graph, initial_state
+from engine.graph import build_graph, initial_state, pack_manifest
 from engine.tracing import traced_invoke
 from engine.memory import get_memory, remember_run, memory_enabled, NullMemory
 
@@ -43,6 +43,10 @@ except Exception:
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=10_000)
+    # OPTIONAL per-request OPERATOR instructions. Honored ONLY if the pack sets
+    # allow_runtime_instructions: true (the engine gates it); otherwise ignored. This is an
+    # OPERATOR-trust field, never a place to forward end-user text.
+    instructions: str | None = Field(default=None, max_length=10_000)
 
     @field_validator("question")
     @classmethod
@@ -84,9 +88,16 @@ def healthz():
             "memory_effective": _memory_effective()}
 
 
+@app.get("/manifest")
+def manifest():
+    """Non-secret pack metadata for a client/UI: name, description, and sample questions
+    ('try these') to show before the first question. Pure config -- no model, no creds."""
+    return pack_manifest(USE_CASE)
+
+
 @app.post("/invoke", response_model=AskResponse)
 def invoke(req: AskRequest, background_tasks: BackgroundTasks) -> AskResponse:
-    final = traced_invoke(_graph, initial_state(req.question), USE_CASE)
+    final = traced_invoke(_graph, initial_state(req.question, req.instructions or ""), USE_CASE)
     background_tasks.add_task(remember_run, final, USE_CASE)   # capture OFF the response path
     return AskResponse(answer=final["best_answer"], score=final["best_score"],
                        run_id=final["run_id"])

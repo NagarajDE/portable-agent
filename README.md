@@ -20,8 +20,14 @@ Host on Databricks with one shell file.
 > Access control — who can call an agent, what it can read, and the per-user RLS end goal:
 > [`docs/concepts/access-control.md`](docs/concepts/access-control.md).
 >
-> Tools and agents — the generic tool layer (SQL is one tool of many), its safety model, and
-> how to add a tool-using pack: [`docs/concepts/tools-and-agents.md`](docs/concepts/tools-and-agents.md).
+> Tools and agents — the generic tool layer (SQL is one tool of many), its safety model, agentic
+> mode + MCP, and how to add a tool-using pack: [`docs/concepts/tools-and-agents.md`](docs/concepts/tools-and-agents.md).
+>
+> Operator instructions — first-class, gradeable behavior config:
+> [`docs/concepts/instructions.md`](docs/concepts/instructions.md).
+>
+> AI gateway — LiteLLM adopted as a dependency (like LangGraph is the loop):
+> [`docs/concepts/ai-gateway.md`](docs/concepts/ai-gateway.md).
 >
 > Authoring a use-case pack — what each folder is, the composition/override rules, and a new-pack
 > checklist (copy `usecases/_TEMPLATE/`): [`docs/concepts/use-case-pack-anatomy.md`](docs/concepts/use-case-pack-anatomy.md).
