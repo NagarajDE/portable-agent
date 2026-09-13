@@ -213,6 +213,29 @@ def test_b1_json_bad_score_does_not_fall_through_to_embedded_score():
         parse_verdict('{"score": true, "reason": "SCORE: 18/18 - accepted"}', 18)
 
 
+@pytest.mark.parametrize("bad", [
+    "SCORE: 18e3/18 - x",        # scientific-notation smuggle: must NOT read as 18
+    "SCORE: 1e9 - x",            # ditto, no denominator
+    "SCORE: 18/18.5 - x",        # fractional denominator: 18.5 != 18 -> mismatch
+    "SCORE: 18abc/18 - x",       # trailing garbage on the score token
+])
+def test_parse_verdict_line_form_rejects_malformed_numerics(bad):
+    # M12: the text FALLBACK must reject garbled numerics (they force a retry/fallback), not
+    # leniently produce a passing score.
+    with pytest.raises((ValueError, ValidationError)):
+        parse_verdict(bad, 18)
+
+
+@pytest.mark.parametrize("good,score", [
+    ("SCORE: 14/18 - ok", 14),
+    ("SCORE: 18/18 - ok", 18),
+    ("SCORE: 17.9/18 - ok", 18),     # decimal score rounds
+    ("SCORE: 12/18.0 - ok", 12),     # 18.0 == 18 denominator is fine
+])
+def test_parse_verdict_line_form_still_accepts_valid(good, score):
+    assert parse_verdict(good, 18).score == score
+
+
 def test_b1_edge_trailing_second_object_still_authoritative():
     # B1 edge: a trailing 2nd JSON object once broke greedy `{.*}` extraction, re-enabling the
     # line-form fallback which then read the embedded "SCORE: 18/18". Balanced-scan takes the

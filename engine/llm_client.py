@@ -339,15 +339,23 @@ def _norm(val) -> str | None:
     return None if s.lower() in ("", "auto") else s
 
 
+def _norm_provider(val) -> str | None:
+    """Like _norm, but LOWERCASES the result. Provider names are case-INSENSITIVE (_build lowercases
+    before lookup), so all comparisons must too -- otherwise WORKER_PROVIDER=LITELLM vs pack
+    `provider: litellm` mismatches and wrongly drops the pack model (NB1). Models keep their case."""
+    n = _norm(val)
+    return n.lower() if n else None
+
+
 def _profile(cfg_models, role: str) -> tuple:
-    """(provider, model) from a pack's `models:` block for 'worker'|'evaluator', normalized; or
-    (None, None). These are DEFAULTS -- env still wins."""
+    """(provider, model) from a pack's `models:` block for 'worker'|'evaluator', normalized (provider
+    lowercased, model case-preserved); or (None, None). These are DEFAULTS -- env still wins."""
     if not isinstance(cfg_models, dict):
         return (None, None)
     p = cfg_models.get(role)
     if not isinstance(p, dict):
         return (None, None)
-    return (_norm(p.get("provider")), _norm(p.get("model")))
+    return (_norm_provider(p.get("provider")), _norm(p.get("model")))
 
 
 def _resolve_models(cfg_models) -> tuple:
@@ -361,9 +369,9 @@ def _resolve_models(cfg_models) -> tuple:
         model-required provider (litellm) doesn't crash for the judge (M8)."""
     wcp, wcm = _profile(cfg_models, "worker")
     ecp, ecm = _profile(cfg_models, "evaluator")
-    wp = _norm(os.getenv("WORKER_PROVIDER")) or wcp or "mock"
+    wp = _norm_provider(os.getenv("WORKER_PROVIDER")) or wcp or "mock"   # providers lowercased (NB1)
     wm = _norm(os.getenv("WORKER_MODEL")) or (wcm if wp == (wcp or wp) else None)   # M6
-    ep = _norm(os.getenv("EVAL_PROVIDER")) or ecp or wp
+    ep = _norm_provider(os.getenv("EVAL_PROVIDER")) or ecp or wp
     em = _norm(os.getenv("EVAL_MODEL")) or (ecm if ep == (ecp or ep) else None)     # M6
     if em is None and ep == wp:                        # M8: same-provider judge inherits worker model
         em = wm

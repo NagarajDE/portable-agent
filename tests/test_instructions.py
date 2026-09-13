@@ -68,6 +68,16 @@ def _all_packs():
                   if p.is_dir() and (p / "config.yaml").exists() and not p.name.startswith(("_", ".")))
 
 
+def test_pack_discovery_is_not_silently_empty():
+    # M16: guard the parametrized regression below -- if discovery returned [], the parametrized test
+    # would produce ZERO cases and pass vacuously. Assert it finds the real packs.
+    packs = _all_packs()
+    assert len(packs) >= 8                                  # we ship ~10 real packs (excluding _TEMPLATE)
+    for expected in ("dq_qals", "api_assistant", "incident_triage"):
+        assert expected in packs
+    assert "_TEMPLATE" not in packs                         # the template is intentionally excluded
+
+
 @pytest.mark.parametrize("uc", _all_packs())
 def test_all_packs_instruction_block_matches_file_presence(uc):
     # M16: across EVERY existing pack, the OPERATOR INSTRUCTIONS block appears IFF the pack ships

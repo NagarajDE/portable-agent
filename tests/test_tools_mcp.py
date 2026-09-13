@@ -50,7 +50,9 @@ def test_mcp_text_content_conversion(monkeypatch):
     _install_fake_mcp(monkeypatch, texts=["hello", "world"])
     t = build_tool("mcp", {"tool": "get_issue", "command": "srv", "read_only": True})
     r = t.run({"id": 1}, ToolContext())
-    assert r.ok and "hello" in r.output and "world" in r.output
+    # EXACT joined text (M14): substring checks would pass even on a stringified SDK object -- assert
+    # the precise "\n".join of the text blocks, proving real content extraction.
+    assert r.ok and r.output == "hello\nworld"
 
 
 def test_mcp_iserror_becomes_failure(monkeypatch):

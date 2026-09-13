@@ -297,12 +297,17 @@ def parse_verdict(raw: str, max_score: int) -> Verdict:
         verdict = Verdict(score=_coerce_score(obj["score"]),
                           reason=str(obj.get("reason", "")).strip())
     else:                                              # 2) line form: SCORE: N[/denom] - reason
-        m = re.search(r"SCORE:\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*([0-9]+))?\s*[-–—:]*\s*([^\n]*)",
+        # `(?![\w.])` after each number rejects a garbled/partial token instead of silently reading a
+        # prefix (M12): 'SCORE: 18e3' or '18/18.5' now FAIL -> retry -> fallback 0, rather than
+        # smuggling a passing 18. The denominator is captured WITH any fraction and compared as a
+        # float, so '18/18.5' is a mismatch (18.5 != 18), not read as 18/18.
+        m = re.search(r"SCORE:\s*([0-9]+(?:\.[0-9]+)?)(?![\w.])\s*"
+                      r"(?:/\s*([0-9]+(?:\.[0-9]+)?)(?![\w.]))?\s*[-–—:]*\s*([^\n]*)",
                       text, re.IGNORECASE)
         if not m:
             raise ValueError(f"no score found in judge reply: {text[:120]!r}")
         denom = m.group(2)
-        if denom is not None and int(denom) != max_score:
+        if denom is not None and float(denom) != max_score:   # 18.5/100/... all rejected; 18 or 18.0 pass
             raise ValueError(f"denominator {denom} != max_score {max_score}")
         verdict = Verdict(score=_coerce_score(m.group(1)), reason=m.group(3).strip() or text)
 

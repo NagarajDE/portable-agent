@@ -97,6 +97,15 @@ def test_same_provider_evaluator_inherits_worker_model(monkeypatch):
     assert isinstance(L.get_eval_client("dq_qals", cfg_models), L.LiteLLMClient)  # constructs, no crash
 
 
+def test_provider_comparison_is_case_insensitive(monkeypatch):
+    # NB1: env WORKER_PROVIDER=LITELLM (uppercase) must MATCH pack provider `litellm` -> keep the
+    # pack model (not drop it via a case-sensitive mismatch).
+    cfg_models = {"worker": {"provider": "litellm", "model": "anthropic/claude-sonnet-4-5"}}
+    monkeypatch.setenv("WORKER_PROVIDER", "LITELLM")
+    wp, wm, _, _ = L._resolve_models(cfg_models)
+    assert wp == "litellm" and wm == "anthropic/claude-sonnet-4-5"   # model retained across case
+
+
 def test_model_actually_passed_to_litellm(monkeypatch):
     # M15: verify the RESOLVED model is what reaches litellm.completion, not just the client class.
     cap = {}
