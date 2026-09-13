@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import time
 
-from engine.tools.base import ToolContext, ToolResult, ToolSpec
+from engine.tools.base import ToolContext, ToolResult, ToolSpec, strict_bool
 from engine.tools.registry import register
 
 
@@ -28,7 +28,7 @@ class MockTool:
         self.spec = ToolSpec(
             name=params.get("tool_name", "mock"),
             description=params.get("description", "Deterministic in-process mock tool."),
-            read_only=bool(params.get("read_only", True)),
+            read_only=strict_bool(params.get("read_only"), True),   # strict: quoted "false" must not fail open (H4)
             input_model=None,                        # accepts a free dict (kept generic)
         )
         self._output = params.get("output")

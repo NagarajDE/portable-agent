@@ -798,3 +798,33 @@ The agent generalized from SQL-only to any-tool, plus four additive capabilities
   remembered user preferences; per-user model routing; native function-calling (portable via a
   gateway); MCP server auto-discovery; write-tool auto-approval. Docs: `instructions.md`,
   `ai-gateway.md`, `tools-and-agents.md` §9.
+
+### 12.21 Cross-review of the four-capabilities build — applied vs. challenged
+
+An external review of §12.20 raised 6 HIGH + 16 MED + 3 LOW. Fixed the real ones (tests 235 → 255):
+- **H1** agentic render is now SINGLE-PASS (lazy `graph.fill`) — a `{tools}` inside the task can't be
+  re-substituted. **H3** MCP `isError` now raises → normalized `ok=False` (a tool error is no longer
+  fed back as success). **H4** security flags (`read_only`, `allow_runtime_instructions`) use a STRICT
+  boolean parser (`strict_bool`) — a quoted `"false"` can't fail open. **H6** a failed refine routes
+  straight to END via a `refine_failed` flag + conditional edge (no extra judge call on the unchanged
+  answer). **M2** strict `final is True`. **M3** worker errors during agentic gathering PROPAGATE (not
+  masked as "no tool needed"). **M5** MCP fails fast at construction if `command` is missing.
+  **M6/M7/M8/L1** model resolution rewritten (`_resolve_models`): a pack model belongs to its pack
+  provider (env provider-override drops it), pack `auto` normalized, a same-provider evaluator inherits
+  the worker model, `model_summary` reports the resolved model. **M10** the `models:` block is
+  deep-merged per role. **M13/M14/M15/M16** tests hardened (execution spy for non-run; stubbed MCP
+  session incl. isError; asserts the model reaching `litellm.completion`; all-packs no-instruction-leak
+  regression).
+- **Challenged (with reasons):** **H2/M4** MCP schema validation + non-text blocks — accepted MVP
+  limitation for an opt-in, live-untested adapter (dispatch still enforces dict input, approval gate,
+  read_only fail-closed, timeout, redaction); documented. **H5** "no per-user auth on runtime
+  instructions" — by design the framework doesn't do auth (platform RBAC does); the gate is off by
+  default and enabling it declares the endpoint's callers operator-trusted; documented in
+  `instructions.md`. **M1** no `ChatLLMClient` — deliberate: prompt-based JSON keeps every provider +
+  mock working with one `complete()`; native tool-calling is a future portable-via-gateway option.
+  **M9** `api_base` doesn't re-route a native model string — documented the correct proxy usage
+  (`litellm_proxy/<name>`). **M11** placement-or-auto-prepend is one coherent model (shared
+  instructions are global like shared skills) and is now regression-tested across all packs. **M12**
+  parse_verdict line-form leniency — low risk (our own judge; JSON path is authoritative + denominator
+  checked); left as-is to avoid destabilizing the hardened parser. **L3** incident_triage canned facts
+  — a documented mock stand-in (real runs answer from gathered observations).

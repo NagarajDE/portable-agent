@@ -43,7 +43,7 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 from pydantic import BaseModel, ConfigDict
 
-from engine.tools.base import ToolContext, ToolResult, ToolSpec, bound_output
+from engine.tools.base import ToolContext, ToolResult, ToolSpec, bound_output, strict_bool
 from engine.tools.registry import register
 
 # Shared address space (CGNAT, RFC 6598) -- not always flagged by ipaddress.is_private (M9).
@@ -151,7 +151,7 @@ class HttpGetTool:
         self.spec = ToolSpec(
             name=params.get("tool_name", "http_get"),
             description=params.get("description", "HTTP GET over an allowlisted endpoint."),
-            read_only=bool(params.get("read_only", True)),   # override for a known-mutating GET (M16)
+            read_only=strict_bool(params.get("read_only"), True),   # strict (H4); override for a known-mutating GET
             input_model=_HttpInput,
         )
         self._base = params.get("base_url", "")

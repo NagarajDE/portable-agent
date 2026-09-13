@@ -35,11 +35,25 @@ def test_agentic_gathers_a_tool_then_finals():
     assert "CATALOG_ROWS" in obs                              # the read-only tool ran, evidence gathered
 
 
-def test_agentic_skips_side_effecting_tool():
-    loaded = [_loaded(tool_name="writer", read_only=False, output="SHOULD_NOT_RUN")]
+def test_agentic_skips_side_effecting_tool_without_running_it():
+    # M13: prove NON-EXECUTION with a spy -- the write tool's run() must never be called.
+    from engine.tools.base import ToolSpec, ToolResult
+
+    class _SpyWriter:
+        def __init__(self):
+            self.spec = ToolSpec(name="writer", description="side-effecting", read_only=False)
+            self.ran = False
+
+        def run(self, input, ctx):
+            self.ran = True
+            return ToolResult(ok=True, output="SHOULD_NOT_RUN")
+
+    spy = _SpyWriter()
+    loaded = [LoadedTool(label="writer", tool=spy, input_template={})]
     w = _Script('{"tool": "writer", "input": {}}')            # always tries the write tool
     obs = run_agentic("q", loaded, w, _ACT, max_steps=2)
-    assert "SHOULD_NOT_RUN" not in obs and "approval" in obs.lower()   # never auto-run a write
+    assert spy.ran is False                                   # never auto-run a write (execution spy)
+    assert "SHOULD_NOT_RUN" not in obs and "approval" in obs.lower()
 
 
 def test_agentic_unknown_tool_is_noted_not_fatal():
@@ -56,12 +70,28 @@ def test_agentic_dedupes_identical_calls():
     assert obs.count("ROWS") == 1 and "already called" in obs.lower()
 
 
-def test_agentic_worker_error_is_non_fatal():
+def test_agentic_worker_error_propagates_not_masked(monkeypatch):
+    # M3: a config/auth error during gathering must SURFACE (gathering is part of generate, which is
+    # fatal-on-failure), not be swallowed as "no tool needed".
     class _Boom:
         def complete(self, prompt, **k):
-            raise RuntimeError("worker down")
-    obs = run_agentic("q", [_loaded(output="X")], _Boom(), _ACT, max_steps=3)
-    assert obs == "No tool observations."                     # degrades, never raises
+            raise RuntimeError("bad LLM config")
+    with pytest.raises(RuntimeError):
+        run_agentic("q", [_loaded(output="X")], _Boom(), _ACT, max_steps=3)
+
+
+def test_agentic_single_pass_render_no_resubstitution():
+    # H1: a task containing a literal "{tools}" must NOT be re-substituted by the tools block.
+    seen = {}
+    class _W:
+        def complete(self, prompt, **k):
+            seen["prompt"] = prompt
+            return '{"final": true}'
+    run_agentic("what about {tools} here", [_loaded(output="X")], _W(),
+                "Q:{task}\nTOOLS:{tools}\nOBS:{observations}", max_steps=1)
+    # the literal {tools} from the task survives verbatim (single-pass fill), appearing twice:
+    assert seen["prompt"].count("{tools}") == 1                # only the task's literal remains
+    assert "Q:what about {tools} here" in seen["prompt"]
 
 
 # --- end-to-end through build_graph (agentic pack) -------------------------
@@ -141,4 +171,21 @@ def test_mcp_tool_requires_tool_and_transport():
     with pytest.raises(ValueError):
         build_tool("mcp", {"command": "run-server"})         # missing `tool`
     with pytest.raises(ValueError):
-        build_tool("mcp", {"tool": "get_issue"})             # missing command/url
+        build_tool("mcp", {"tool": "get_issue"})             # missing command (url/SSE not wired -> M5)
+
+
+# --- H4: strict boolean parsing (security-sensitive flags must not fail open) ---
+def test_strict_bool_rejects_and_parses():
+    from engine.tools import strict_bool
+    assert strict_bool(True, False) is True and strict_bool(False, True) is False
+    assert strict_bool(None, True) is True                    # None -> default
+    assert strict_bool("false", True) is False               # the quoted-YAML fail-open case
+    assert strict_bool("TRUE", False) is True
+    with pytest.raises(ValueError):
+        strict_bool("maybe", False)                          # a typo is surfaced, not guessed
+
+
+def test_mock_tool_read_only_string_false_is_not_fail_open():
+    # H4: read_only: "false" (a truthy string) must be parsed to False, i.e. side-effecting.
+    t = build_tool("mock", {"tool_name": "w", "read_only": "false"})
+    assert t.spec.read_only is False

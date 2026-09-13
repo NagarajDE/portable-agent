@@ -23,25 +23,45 @@ from engine.llm_client import (get_llm_client, get_eval_client, model_summary,
                                 LLMClient, EmptyResponseError)
 from engine.sql_tool import get_sql_tool, SQLTool
 from engine.tracing import instrument       # observability is applied from OUTSIDE the nodes
-from engine.tools import load_tools, gather_context, describe_tools, run_agentic   # generic tool layer (SQL = one tool)
+from engine.tools import (load_tools, gather_context, describe_tools, run_agentic,   # generic tool layer (SQL = one tool)
+                          strict_bool)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 USECASES = REPO_ROOT / "usecases"
 SHARED = REPO_ROOT / "shared"
 
 
+def _merge_models(acc: dict, incoming) -> dict:
+    """Deep-merge the nested `models:` block PER ROLE (worker/evaluator), so a pack overriding one
+    role keeps the other role (and other fields) inherited from a base -- a shallow dict.update would
+    replace the whole `models:` block and silently drop inherited roles/fields (M10)."""
+    if not isinstance(incoming, dict):
+        return acc
+    out = dict(acc)
+    for role, prof in incoming.items():
+        out[role] = {**out[role], **prof} if isinstance(prof, dict) and isinstance(out.get(role), dict) else prof
+    return out
+
+
 def load_config(use_case: str) -> dict:
-    """Merge inherited bases (e.g. shared) then the pack's own config (pack wins)."""
+    """Merge inherited bases (e.g. shared) then the pack's own config (pack wins). Scalars use a
+    shallow last-writer-wins; the nested `models:` block is deep-merged per role (see _merge_models)."""
     pack = yaml.safe_load((USECASES / use_case / "config.yaml").read_text(encoding="utf-8")) or {}
     inherits = pack.get("inherits", [])
     if isinstance(inherits, str):                      # `inherits: shared` -> ["shared"], not chars
         inherits = [inherits]
     merged: dict = {}
+    models_acc: dict = {}
     for base in inherits:
         base_cfg = (SHARED if base == "shared" else REPO_ROOT / base) / "config.yaml"
         if base_cfg.exists():
-            merged.update(yaml.safe_load(base_cfg.read_text(encoding="utf-8")) or {})
+            b = yaml.safe_load(base_cfg.read_text(encoding="utf-8")) or {}
+            models_acc = _merge_models(models_acc, b.get("models"))
+            merged.update(b)
+    models_acc = _merge_models(models_acc, pack.get("models"))
     merged.update(pack)
+    if models_acc:                                     # restore the deep-merged block over the shallow update
+        merged["models"] = models_acc
     merged.pop("inherits", None)
     return merged
 
@@ -302,6 +322,7 @@ class State(TypedDict):
     best_feedback: str        # the critique that produced best_answer (refine builds from BEST)
     stall: int                # consecutive refines that did NOT beat best_score (no-progress stop)
     iterations: int
+    refine_failed: bool       # a refine worker call raised -> route straight to END (skip re-evaluate)
     instructions: str         # per-request OPERATOR instructions (applied only if the pack allows)
     run_id: str               # per-run id; the join key for observability (see engine/tracing.py)
 
@@ -366,7 +387,7 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     # instruction files. Per-REQUEST instructions (state) are honored ONLY if the pack opts in.
     base_instructions = (instructions if instructions is not None
                          else load_instructions(use_case, cfg.get("exclude_shared_instructions")))
-    allow_runtime = bool(cfg.get("allow_runtime_instructions", False))
+    allow_runtime = strict_bool(cfg.get("allow_runtime_instructions"), False)   # strict: no fail-open (H4)
 
     def instr_for(s: State) -> str:
         runtime = s.get("instructions", "") if allow_runtime else ""
@@ -449,12 +470,14 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
                                         feedback=base_feedback, skills=skills, revision=nxt))
         except (RuntimeError, EmptyResponseError) as e:
             # A failed REFINEMENT is non-fatal: we already have a scored best_answer, so keep it and
-            # end the loop instead of throwing away good work with a 500 (Bug 1). (A failure on the
-            # FIRST generate has nothing to fall back to, so generate stays unguarded -> fatal.)
+            # end the loop instead of throwing away good work with a 500 (Bug 1). Route STRAIGHT to
+            # END via `refine_failed` -- NOT back through evaluate -- so we don't spend (and risk) an
+            # extra judge call on the unchanged answer (H6). (A failure on the FIRST generate has
+            # nothing to fall back to, so generate stays unguarded -> fatal.)
             log(f"  [refine]   rev{nxt} worker failed: {e}; keeping best so far")
-            return {**s, "iterations": max_iters}       # forces keep_going -> stop; best_* preserved
+            return {**s, "refine_failed": True}
         log(f"  [refine]   rev{nxt} -> {answer}")
-        return {**s, "answer": answer, "iterations": nxt}
+        return {**s, "answer": answer, "iterations": nxt, "refine_failed": False}
 
     def keep_going(s: State) -> str:
         if s["score"] >= pass_score or s["iterations"] >= max_iters:
@@ -462,6 +485,11 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         if max_stall and s.get("stall", 0) >= max_stall:   # refines aren't beating best -> stop (Bug 3)
             return "stop"
         return "refine"
+
+    def after_refine(s: State) -> str:
+        # A failed refine ends the run immediately (best_* already preserved); a successful one goes
+        # to evaluate to score the new revision. This makes the failed-refine path skip evaluate (H6).
+        return "stop" if s.get("refine_failed") else "evaluate"
 
     # Observability is applied here, from OUTSIDE the nodes: instrument() wraps each node
     # to emit a timed event (or returns it unchanged when TRACER=none -> zero overhead).
@@ -472,12 +500,12 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     g.set_entry_point("generate")
     g.add_edge("generate", "evaluate")
     g.add_conditional_edges("evaluate", keep_going, {"refine": "refine", "stop": END})
-    g.add_edge("refine", "evaluate")
+    g.add_conditional_edges("refine", after_refine, {"evaluate": "evaluate", "stop": END})
     return g.compile()
 
 
 def initial_state(task: str, instructions: str = "") -> State:
     return {"task": task, "data": "", "answer": "", "feedback": "",
             "score": -1, "best_answer": "", "best_score": -1, "best_feedback": "",
-            "stall": 0, "iterations": 0, "instructions": instructions or "",
-            "run_id": uuid.uuid4().hex[:12]}
+            "stall": 0, "iterations": 0, "refine_failed": False,
+            "instructions": instructions or "", "run_id": uuid.uuid4().hex[:12]}

@@ -33,3 +33,12 @@ def test_manifest_no_config_samples_no_golden_is_empty(monkeypatch):
     monkeypatch.setattr(G, "_golden_questions", lambda uc: [])
     m = pack_manifest("whatever")
     assert m["sample_questions"] == [] and m["name"] == "X"
+
+
+def test_merge_models_deep_per_role():
+    # M10: overriding ONE role must keep the other role + inherited fields, not replace the block.
+    base = {"worker": {"provider": "cortex", "model": "m1"}, "evaluator": {"provider": "cortex"}}
+    pack = {"worker": {"model": "m2"}}
+    out = G._merge_models(base, pack)
+    assert out["worker"] == {"provider": "cortex", "model": "m2"}   # role deep-merged (provider kept)
+    assert out["evaluator"] == {"provider": "cortex"}              # other role preserved

@@ -329,53 +329,63 @@ def _build(provider: str, use_case: str | None, model: str | None) -> LLMClient:
     return _PROVIDERS[provider](model)
 
 
-def _resolve(val: str | None, default):
-    """Unset or 'auto' -> use the default. For a model, default=None means
-    'let the provider's client pick its own default model'. Trims whitespace so a stray
-    ' cortex ' doesn't become an unknown-provider KeyError."""
-    if val is None or val.strip().lower() in ("", "auto"):
-        return default
-    return val.strip()
+def _norm(val) -> str | None:
+    """Normalize a provider/model value: None / '' / 'auto' -> None (so it falls to the next source);
+    otherwise the trimmed string. Applied to BOTH env AND pack values, so a pack `provider: auto`
+    can't reach _PROVIDERS['auto'] -> KeyError (M7)."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    return None if s.lower() in ("", "auto") else s
 
 
 def _profile(cfg_models, role: str) -> tuple:
-    """(provider, model) from a pack's config `models:` block for 'worker'|'evaluator', or
-    (None, None) if unset. These are DEFAULTS -- env still wins (see precedence below)."""
+    """(provider, model) from a pack's `models:` block for 'worker'|'evaluator', normalized; or
+    (None, None). These are DEFAULTS -- env still wins."""
     if not isinstance(cfg_models, dict):
         return (None, None)
     p = cfg_models.get(role)
     if not isinstance(p, dict):
         return (None, None)
-    return (p.get("provider"), p.get("model"))
+    return (_norm(p.get("provider")), _norm(p.get("model")))
 
 
-# Precedence per role:  env (WORKER_PROVIDER/MODEL ...) > pack config `models:` > built-in default.
-# Env-wins preserves the "flip provider on migration with one env var" story; the pack `models:`
-# block just gives sensible per-pack defaults.
+def _resolve_models(cfg_models) -> tuple:
+    """Resolve (worker_provider, worker_model, eval_provider, eval_model) once, so get_llm_client,
+    get_eval_client and model_summary agree. Precedence per field: env > pack `models:` > default.
+
+    Two correctness rules the naive version got wrong:
+      * a pack MODEL belongs to its pack PROVIDER -- if env overrides the provider to a DIFFERENT one,
+        the pack model does NOT apply (else e.g. an Anthropic model name is sent to Cortex) (M6);
+      * a same-provider evaluator with no model of its own inherits the WORKER's model, so a
+        model-required provider (litellm) doesn't crash for the judge (M8)."""
+    wcp, wcm = _profile(cfg_models, "worker")
+    ecp, ecm = _profile(cfg_models, "evaluator")
+    wp = _norm(os.getenv("WORKER_PROVIDER")) or wcp or "mock"
+    wm = _norm(os.getenv("WORKER_MODEL")) or (wcm if wp == (wcp or wp) else None)   # M6
+    ep = _norm(os.getenv("EVAL_PROVIDER")) or ecp or wp
+    em = _norm(os.getenv("EVAL_MODEL")) or (ecm if ep == (ecp or ep) else None)     # M6
+    if em is None and ep == wp:                        # M8: same-provider judge inherits worker model
+        em = wm
+    return wp, wm, ep, em
+
+
 def get_llm_client(use_case: str | None = None, cfg_models=None) -> LLMClient:
     """The WORKER: generates and refines. Provider+model from env > pack `models.worker` > default."""
-    cp, cm = _profile(cfg_models, "worker")
-    provider = _resolve(os.getenv("WORKER_PROVIDER"), cp or "mock")
-    return _build(provider, use_case, _resolve(os.getenv("WORKER_MODEL"), cm))
+    wp, wm, _, _ = _resolve_models(cfg_models)
+    return _build(wp, use_case, wm)
 
 
 def get_eval_client(use_case: str | None = None, cfg_models=None) -> LLMClient:
-    """The EVALUATOR: scores against the rubric. Judge independence is CONFIGURABLE. Provider+model
-    from env > pack `models.evaluator` > (evaluator provider defaults to the worker's). Set a
-    different model/provider for a genuinely independent judge (a model shouldn't grade its own work)."""
-    wcp, _ = _profile(cfg_models, "worker")
-    ecp, ecm = _profile(cfg_models, "evaluator")
-    worker_provider = _resolve(os.getenv("WORKER_PROVIDER"), wcp or "mock")
-    provider = _resolve(os.getenv("EVAL_PROVIDER"), ecp or worker_provider)
-    return _build(provider, use_case, _resolve(os.getenv("EVAL_MODEL"), ecm))
+    """The EVALUATOR: scores against the rubric. Judge independence is CONFIGURABLE (env / pack
+    `models.evaluator`); it defaults to the worker's provider+model. Set a different model/provider
+    for a genuinely independent judge (a model shouldn't grade its own work)."""
+    _, _, ep, em = _resolve_models(cfg_models)
+    return _build(ep, use_case, em)
 
 
 def model_summary(cfg_models=None) -> str:
-    """One-line resolved worker/evaluator selection, for the build log (same precedence as above)."""
-    wcp, wcm = _profile(cfg_models, "worker")
-    ecp, ecm = _profile(cfg_models, "evaluator")
-    wp = _resolve(os.getenv("WORKER_PROVIDER"), wcp or "mock")
-    ep = _resolve(os.getenv("EVAL_PROVIDER"), ecp or wp)
-    wm = _resolve(os.getenv("WORKER_MODEL"), wcm or "auto")
-    em = _resolve(os.getenv("EVAL_MODEL"), ecm or "auto")
-    return f"worker={wp}:{wm}  evaluator={ep}:{em}"
+    """One-line RESOLVED worker/evaluator selection for the build log (reports the actual model, or
+    'auto' when the provider picks its own default) (L1)."""
+    wp, wm, ep, em = _resolve_models(cfg_models)
+    return f"worker={wp}:{wm or 'auto'}  evaluator={ep}:{em or 'auto'}"

@@ -20,7 +20,7 @@ Public contracts are re-exported here so callers can `from engine.tools import .
 from __future__ import annotations
 
 from engine.tools.base import (
-    ToolSpec, ToolResult, ToolError, ToolContext, Tool, bound_output, redact,
+    ToolSpec, ToolResult, ToolError, ToolContext, Tool, bound_output, redact, strict_bool,
 )
 from engine.tools.registry import register, build_tool, known_tools, UnknownToolError
 from engine.tools.dispatch import (
@@ -34,7 +34,7 @@ from engine.tools.agentic import run_agentic       # opt-in model-driven gatheri
 from engine.tools import sql_bridge, mock_tool, http_tool, mcp_tool  # noqa: F401,E402
 
 __all__ = [
-    "ToolSpec", "ToolResult", "ToolError", "ToolContext", "Tool", "bound_output", "redact",
+    "ToolSpec", "ToolResult", "ToolError", "ToolContext", "Tool", "bound_output", "redact", "strict_bool",
     "register", "build_tool", "known_tools", "UnknownToolError",
     "dispatch", "ToolValidationError", "ToolTimeoutError", "ApprovalRequiredError",
     "LoadedTool", "load_tools", "gather_context", "describe_tools", "run_agentic",

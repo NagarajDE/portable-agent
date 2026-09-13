@@ -1,6 +1,8 @@
 """OPERATOR INSTRUCTIONS: composed like skills, injected into generate/refine/rubric, gradeable,
 and (per-request) gated by allow_runtime_instructions. Existing packs (no instruction files) get no
 block. All offline/deterministic."""
+import pytest
+
 import engine.graph as G
 from engine.graph import build_graph, initial_state, load_instructions
 
@@ -59,6 +61,27 @@ def test_runtime_instructions_are_gated(monkeypatch):
     build_graph("dq_qals", llm=w2, eval_llm=_Cap("SCORE: 18/18 - ok"), sql=_Sql(), verbose=False) \
         .invoke(initial_state("q", instructions="RUNTIME_XYZ"))
     assert "RUNTIME_XYZ" in w2.prompts[0]                 # gate on -> applied
+
+
+def _all_packs():
+    return sorted(p.name for p in G.USECASES.iterdir()
+                  if p.is_dir() and (p / "config.yaml").exists() and not p.name.startswith(("_", ".")))
+
+
+@pytest.mark.parametrize("uc", _all_packs())
+def test_all_packs_instruction_block_matches_file_presence(uc):
+    # M16: across EVERY existing pack, the OPERATOR INSTRUCTIONS block appears IFF the pack ships
+    # instruction files -> proves zero-break (no silent injection) for the packs without them, and
+    # that the feature fires for the one that has them (incident_triage).
+    cfg = G.load_config(uc)
+    worker, judge = _Cap("a", "a2", "a3", "a4", "a5"), _Cap("SCORE: 18/18 - ok")
+    build_graph(uc, llm=worker, eval_llm=judge, sql=_Sql(), verbose=False) \
+        .invoke(initial_state(cfg.get("sample_task") or "q"))
+    prompts = worker.prompts + judge.prompts
+    instr_dir = G.USECASES / uc / "instructions"
+    has_files = instr_dir.exists() and bool(list(instr_dir.glob("*.md")))
+    leaked = any("OPERATOR INSTRUCTIONS" in p for p in prompts)
+    assert leaked == has_files, f"{uc}: block present={leaked} but instruction files present={has_files}"
 
 
 def test_load_instructions_composes_shared_and_pack_and_excludes(tmp_path, monkeypatch):

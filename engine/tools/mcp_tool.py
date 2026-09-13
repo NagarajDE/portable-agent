@@ -20,7 +20,7 @@ Config (usecases/<pack>/config.yaml):
 """
 from __future__ import annotations
 
-from engine.tools.base import ToolContext, ToolResult, ToolSpec, bound_output
+from engine.tools.base import ToolContext, ToolResult, ToolSpec, bound_output, strict_bool
 from engine.tools.registry import register
 
 
@@ -29,16 +29,18 @@ class McpTool:
         self.spec = ToolSpec(
             name=params.get("tool_name", params.get("tool", "mcp")),
             description=params.get("description", "A tool exposed by an MCP server."),
-            read_only=bool(params.get("read_only", False)),   # fail-closed: unknown capability = not auto-run
-            input_model=None,                                  # MCP tools accept a free arg dict
+            read_only=strict_bool(params.get("read_only"), False),   # fail-closed + strict (H4)
+            input_model=None,                                  # MCP tools accept a free arg dict; see
+                                                               # LIMITATIONS below re: schema validation
         )
         self._tool = params.get("tool")
         self._command = params.get("command")                  # stdio server command line
-        self._url = params.get("url")                          # (SSE/HTTP server -- not wired yet)
         if not self._tool:
             raise ValueError("mcp tool needs a `tool` param (the MCP tool name to call)")
-        if not (self._command or self._url):
-            raise ValueError("mcp tool needs a `command` (stdio) or `url` (sse) for the MCP server")
+        # M5: fail FAST at construction, not at first call. Only stdio (`command`) is wired today; a
+        # `url`/SSE-only config would otherwise construct fine and then error mid-request.
+        if not self._command:
+            raise ValueError("mcp tool needs a `command` (stdio); url/SSE transport is not wired yet")
 
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
         import asyncio
@@ -46,12 +48,14 @@ class McpTool:
         return ToolResult(ok=True, output=bound_output(text), meta={"tool": self._tool})
 
     async def _call(self, arguments: dict) -> str:
-        # LAZY + UNTESTED here (needs the `mcp` SDK + a live server). stdio transport only for now.
+        # LAZY + UNTESTED against a live server (needs the `mcp` SDK + a running server). stdio only.
+        # LIMITATIONS (accepted for this MVP adapter; the dispatch() boundary still applies):
+        #   * arguments are NOT validated against the server's per-tool input schema (no list_tools
+        #     discovery) -- dispatch guarantees a dict, nothing finer;
+        #   * only text content blocks are surfaced (structured/resource blocks are dropped) (M4).
         import shlex
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
-        if not self._command:
-            raise RuntimeError("only stdio MCP servers (`command`) are wired; set `command`")
         parts = shlex.split(self._command)
         server = StdioServerParameters(command=parts[0], args=parts[1:])
         async with stdio_client(server) as (read, write):
@@ -60,6 +64,9 @@ class McpTool:
                 result = await session.call_tool(self._tool, arguments=arguments)
                 blocks = [getattr(b, "text", "") for b in (getattr(result, "content", None) or [])]
                 text = "\n".join(t for t in blocks if t)
+                if getattr(result, "isError", False):          # H3: a tool-level error is NOT success;
+                    raise RuntimeError(                         # raise -> dispatch normalizes to ok=False
+                        f"MCP tool {self._tool!r} returned an error: {text or result!r}")
                 return text or str(result)
 
 

@@ -114,6 +114,24 @@ def redact(text: str) -> str:
     return out
 
 
+def strict_bool(value, default: bool) -> bool:
+    """Parse a config boolean STRICTLY. Security-sensitive flags (a tool's `read_only`, a pack's
+    `allow_runtime_instructions`) must not FAIL OPEN: `bool("false")` is True, so YAML's quoted
+    `"false"` would silently flip a write tool to read-only / enable runtime instructions. Here a
+    real bool passes through, None -> default, a recognized string token maps to its bool, and
+    anything else RAISES (a typo is surfaced, never guessed)."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off"):
+        return False
+    raise ValueError(f"expected a boolean (true/false), got {value!r}")
+
+
 def clean_error(text: str, max_chars: int = DEFAULT_MAX_ERROR_CHARS) -> str:
     """Redact secrets AND bound size for an error string that is RETURNED to a caller (not only
     logged). Raw SDK/network exceptions can embed authenticated URLs, headers, or tokens and can be

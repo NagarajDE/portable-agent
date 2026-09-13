@@ -142,9 +142,12 @@ def test_worker_failure_on_refine_keeps_best(monkeypatch):
         "max_score": 18, "pass_score": 18, "max_iters": 3, "eval_retries": 0,
         "max_stall": 0, "default_sql_tool": "mock"})
     worker = _RaisingJudge("A0", RuntimeError("Cortex output truncated"))   # good rev0, then fail
-    g = build_graph("dq_qals", llm=worker, eval_llm=_Seq("SCORE: 12/18 - needs work"), verbose=False)
+    judge = _Seq("SCORE: 12/18 - needs work")
+    g = build_graph("dq_qals", llm=worker, eval_llm=judge, verbose=False)
     f = g.invoke(initial_state("q"))                       # must not raise
     assert f["best_answer"] == "A0" and f["best_score"] == 12
+    assert f["refine_failed"] is True                     # routed to END, not back through evaluate
+    assert judge.i == 1                                   # H6: judge NOT called again after failed refine
 
 
 def test_worker_failure_on_generate_is_fatal(monkeypatch):

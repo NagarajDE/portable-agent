@@ -12,8 +12,10 @@ Design choices (minimal + safe):
   * READ-ONLY only -- ctx.approved is False, and a side-effecting tool is never auto-run (it returns
     an observation saying approval is required). Writes stay out of the auto path, as in the
     deterministic gatherer.
-  * BOUNDED -- at most `max_steps` tool calls; identical (tool,input) calls are de-duplicated; a
-    worker error during gathering is non-fatal (we use whatever evidence we have).
+  * BOUNDED -- at most `max_steps` tool calls; identical (tool,input) calls are de-duplicated. A
+    worker EXCEPTION during gathering PROPAGATES (gathering is part of `generate`, which is
+    fatal-on-failure): a config/auth error must surface, not masquerade as "no tool needed". A
+    merely-unparseable reply is not an error -- it just ends gathering with the evidence so far.
   * TRUST TRADE-OFF (documented): once the model picks tools from observations, tool output CAN
     influence later tool selection -- weaker than the deterministic path's injection-safety. Every
     call still goes through dispatch() (validation, timeout, redaction, bounds); http stays
@@ -58,33 +60,28 @@ def _first_json_object(text: str) -> dict | None:
     return None
 
 
-def _render(template: str, task: str, tools: str, observations: str) -> str:
-    """Fill the three act-prompt placeholders by plain substitution (no str.format -- tool output
-    may contain braces). Kept local so this module doesn't import engine.graph.fill()."""
-    return (template.replace("{task}", task)
-                    .replace("{tools}", tools)
-                    .replace("{observations}", observations))
-
-
 def run_agentic(task: str, loaded, llm, act_template: str,
                 run_id: str = "-", max_steps: int = 4) -> str:
     """Model-driven, bounded gathering over a pack's READ-ONLY tools. Returns the concatenated,
     labeled observations (the {data}/{observations} the `generate` node then reasons over)."""
+    from engine.graph import fill                 # lazy (avoid graph<->tools import cycle): SINGLE-PASS,
+    #   brace-safe render -- chained str.replace() would re-substitute a placeholder that appears inside
+    #   an already-substituted value (e.g. a task containing "{tools}") (H1).
     timeout = max(1.0, float(os.getenv("TOOL_TIMEOUT_SECONDS", "30")))
     ctx = ToolContext(run_id=run_id or "-", timeout_s=timeout, approved=False)   # never auto-approve writes
     by_name = {lt.label: lt for lt in loaded}
     observations: list[str] = []
     seen: set = set()
     for _ in range(max(0, int(max_steps))):
-        rendered = _render(act_template, task, describe_tools(loaded),
-                           "\n\n".join(observations) or "None yet.")
-        try:
-            raw = llm.complete(rendered)
-        except Exception:
-            break                                    # a worker error during gathering is non-fatal
+        rendered = fill(act_template, task=task, tools=describe_tools(loaded),
+                        observations="\n\n".join(observations) or "None yet.")
+        # M3: do NOT swallow errors here -- gathering is part of `generate` (which is fatal-on-failure,
+        # like the first draft). A config/auth/rate-limit error must surface, not masquerade as
+        # "no tool needed". (Transient risk is bounded by the adapters' own retries.)
+        raw = llm.complete(rendered)
         obj = _first_json_object(raw)
-        if not isinstance(obj, dict) or obj.get("final") or "tool" not in obj:
-            break                                    # model is done gathering (or unparseable)
+        if not isinstance(obj, dict) or obj.get("final") is True or "tool" not in obj:
+            break                                    # done gathering: strict final==True, or unparseable/no tool (M2)
         name = str(obj.get("tool", ""))
         lt = by_name.get(name)
         if lt is None:

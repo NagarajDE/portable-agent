@@ -1,5 +1,14 @@
 # Design spec — four incremental capabilities
 
+> **STATUS: IMPLEMENTED** (all four, zero-break; see `PROJECT_CONTEXT.md` §12.20). This file is the
+> original design/plan; the authoritative "how it works" now lives in the concept docs:
+> `instructions.md`, `ai-gateway.md`, `tools-and-agents.md` §9. Two things are true post-build that
+> the "baseline" language below predates: the tool layer now exists (SQL is one tool), and an
+> **opt-in** agentic mode lets the model pick tools. **Agentic tool-calling is deliberately
+> PROMPT-BASED (JSON-in-text), NOT a new `ChatLLMClient` protocol** — that keeps every provider (and
+> the mock) working with one `complete(prompt) -> str`; native tool-calling stays a future,
+> portable-via-the-gateway option.
+
 A minimal, incremental design for four additions to the portable agent framework, written so a
 developer (human or AI) can implement it against the current codebase without further context.
 **Nothing here changes existing behavior unless a pack opts in.** Memory is *not* built yet; each

@@ -21,7 +21,12 @@ Provider API keys come from the standard env vars LiteLLM reads (`ANTHROPIC_API_
   multi-provider + per-call fallbacks.
 - **Proxy (opt-in, org governance):** run the LiteLLM Proxy (or Databricks AI Gateway — also
   OpenAI-compatible) and set `LITELLM_BASE_URL`. Central keys/budgets/rate-limits/logging live **in
-  the proxy config**, not this repo. Same adapter, one env var.
+  the proxy config**, not this repo.
+  - **Routing caveat (M9):** `api_base` alone does **not** re-route a native model string. Setting
+    `LITELLM_BASE_URL` while keeping `model: anthropic/claude-...` still calls Anthropic directly.
+    To go *through* the proxy, use the proxy's route: `model: litellm_proxy/<name-your-proxy-exposes>`
+    (or `openai/<name>` since the proxy is OpenAI-compatible) **with** `LITELLM_BASE_URL`. The proxy
+    then maps that name to whatever backend/fallback it's configured for.
 
 ## Selecting it
 ```yaml
