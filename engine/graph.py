@@ -297,19 +297,25 @@ def parse_verdict(raw: str, max_score: int) -> Verdict:
         verdict = Verdict(score=_coerce_score(obj["score"]),
                           reason=str(obj.get("reason", "")).strip())
     else:                                              # 2) line form: SCORE: N[/denom] - reason
-        # `(?![\w.])` after each number rejects a garbled/partial token instead of silently reading a
-        # prefix (M12): 'SCORE: 18e3' or '18/18.5' now FAIL -> retry -> fallback 0, rather than
-        # smuggling a passing 18. The denominator is captured WITH any fraction and compared as a
-        # float, so '18/18.5' is a mismatch (18.5 != 18), not read as 18/18.
-        m = re.search(r"SCORE:\s*([0-9]+(?:\.[0-9]+)?)(?![\w.])\s*"
-                      r"(?:/\s*([0-9]+(?:\.[0-9]+)?)(?![\w.]))?\s*[-–—:]*\s*([^\n]*)",
-                      text, re.IGNORECASE)
+        # Parsed in TWO steps so a malformed number can't be silently skipped (M12). The `(?![\w.])`
+        # boundary rejects a garbled score token (18e3, 18abc). CRUCIALLY, a denominator is not just
+        # "optional": if a '/' follows the score, a VALID clean denominator is REQUIRED -- otherwise a
+        # single optional group would BACKTRACK past a bad denominator ('18/18e3') and let '/18e3'
+        # become reason text with the check skipped, smuggling a passing 18.
+        m = re.search(r"SCORE:\s*([0-9]+(?:\.[0-9]+)?)(?![\w.])", text, re.IGNORECASE)
         if not m:
             raise ValueError(f"no score found in judge reply: {text[:120]!r}")
-        denom = m.group(2)
-        if denom is not None and float(denom) != max_score:   # 18.5/100/... all rejected; 18 or 18.0 pass
-            raise ValueError(f"denominator {denom} != max_score {max_score}")
-        verdict = Verdict(score=_coerce_score(m.group(1)), reason=m.group(3).strip() or text)
+        rest = text[m.end():]
+        dm = re.match(r"\s*/\s*([0-9]+(?:\.[0-9]+)?)(?![\w.])", rest)
+        if re.match(r"\s*/", rest) and dm is None:     # a slash with NO valid denominator -> reject
+            raise ValueError(f"malformed denominator after score in: {text[:120]!r}")
+        if dm is not None:
+            if float(dm.group(1)) != max_score:        # 18.5 / 100 / ... rejected; 18 or 18.0 pass
+                raise ValueError(f"denominator {dm.group(1)} != max_score {max_score}")
+            rest = rest[dm.end():]
+        reason_m = re.match(r"\s*[-–—:]*\s*([^\n]*)", rest)
+        reason = (reason_m.group(1).strip() if reason_m else "") or text
+        verdict = Verdict(score=_coerce_score(m.group(1)), reason=reason)
 
     if verdict.score > max_score:
         raise ValueError(f"score {verdict.score} exceeds max {max_score}")

@@ -1,10 +1,12 @@
 # The refine loop — how the agent improves an answer (and when it stops)
 
-This explains two things about the generate→evaluate→refine loop in
-[`engine/graph.py`](../../engine/graph.py):
+This explains the generate→evaluate→refine loop in [`engine/graph.py`](../../engine/graph.py):
 
-1. **What "refine from best" means** and why the loop works that way.
-2. **The two scoring knobs** — `max_score` vs `pass_score` — and how they decide when to stop.
+1. **What "refine from best" means** and why the loop works that way (§2).
+2. **The prompts + `{placeholders}`** behind each step (§3).
+3. **The two scoring knobs** — `max_score` vs `pass_score` — and when it stops (§4).
+4. **What "refine" actually re-runs** — it improves the existing answer, it does *not* restart (§5).
+5. **What happens when the judge's verdict can't be parsed** — retry the judge, then fail safe (§6).
 
 ---
 
@@ -26,6 +28,41 @@ EVALUATE ──► judge scores it 0..max_score, writes a critique (feedback)
 
 Each **refine** step takes *an* answer plus the judge's feedback and rewrites it. The question
 this doc answers: **which answer does refine build on?**
+
+### Who does what (don't conflate these)
+
+- **`refine` is a WORKER step** — it produces a **new, improved answer**. It is NOT the evaluator
+  re-reading the same text. Each refine yields a *different* revision, which the judge then grades.
+- **The evaluator is the grader.** We don't "help" it — the *help flows the other way*: the judge's
+  **feedback** is handed to the **worker** so it knows what to fix. Flow: *judge feedback → worker →
+  refined answer → judge grades the refined answer.*
+- **Re-reading the SAME answer** happens only in the **garbled-verdict retry** (§6) — a judge-only
+  re-score because its previous reply couldn't be parsed. That is not refine; no worker is involved.
+- **Which answer refine builds on:** the **best so far**. On the *first* refine there is only rev0
+  (from `generate`), so "best" = rev0; on later rounds it's the highest-scoring revision (see §2).
+
+### A worked example (two iterations)
+
+**Question:** "What is the total on-hand inventory balance by location?"
+**Evidence (from the tool/SQL step, i.e. `{data}`):**
+```
+LOCATION | ON_HAND
+SD-01    | 12340
+SD-02    | 8915
+SG-01    | 4220
+```
+
+| step | who | output |
+|---|---|---|
+| generate (rev0) | worker | "There's on-hand inventory across a few locations." |
+| evaluate | judge | `SCORE: 11/18 - no total, no per-location numbers, doesn't name the largest` |
+| keep_going | engine | 11 < 15 (pass_score) and iterations left → **refine** |
+| refine (rev1) | worker | *given rev0 (the best so far) + that feedback →* "Total on-hand is **25,475** units across 3 locations: SD-01 (12,340), SD-02 (8,915), SG-01 (4,220). SD-01 holds ~48% — the largest." |
+| evaluate | judge | `SCORE: 16/18 - complete and quantified; names the largest` |
+| keep_going | engine | 16 ≥ 15 → **STOP**, return rev1 (16/18) |
+
+The judge graded **two different answers** (rev0, then rev1) — never the same text twice. Its
+critique of rev0 became refine's `{feedback}`, which is how the worker built rev1.
 
 ---
 
@@ -218,6 +255,64 @@ rounds even if it never reaches `pass_score` — a safety cap so a hard question
 Either condition ends the loop; you always get back the **best** answer seen, with its score.
 
 > Scores are always reported out of **`max_score`** (e.g. `16/18`), never out of `pass_score`.
+
+---
+
+## 5. What "refine" actually re-runs (it does NOT restart)
+
+A common misread: "loop to refine" sounds like the whole thing starts over. It doesn't.
+
+- **`generate` runs exactly once**, at the very start (rev0).
+- After that the cycle is **`refine` ↔ `evaluate` only** — it **never** goes back to `generate`.
+- `refine` does **not** ask the worker for a brand-new answer from a blank page. It hands the worker
+  the **existing best answer** (`best_answer` + `best_feedback`) and says *"improve THIS, here's the
+  critique,"* producing a revised version — which then goes to `evaluate` for re-review.
+
+```
+generate (once) ─► evaluate ─►(score < pass_score, iters left)─► refine ─► evaluate ─► … ─► STOP
+                      ▲                                             │
+                      └───────────── re-review the revision ────────┘
+   refine = take the EXISTING best answer + feedback → rewrite it → re-evaluate   (never re-generate)
+```
+
+So: **existing answer → apply refine → re-evaluate.** The worker improves; it never starts over.
+
+## 6. When the judge's verdict can't be parsed
+
+"We" here is the **`evaluate` node**. It calls the judge, then parses the judge's *free-text reply*
+(a JSON object **or** the `SCORE: N/max - reason` line form — the reply is the judge *model's* free
+text, which we don't control, so it's parsed defensively; see the `parse_verdict` docstring). The
+denominator (`/18`) is fixed by **us** in the rubric prompt; we just verify the judge echoed it and
+didn't quietly switch scales (`85/100`). If the reply is unparseable or out of range:
+
+1. **Re-ask ONLY the judge** — not the whole loop, and **not** `generate`. We re-send the **entire
+   rubric prompt rebuilt from scratch** — task + evidence + the **same worker answer** + scoring
+   instructions — with only a format nudge appended: *"Your previous reply could not be parsed. Reply
+   with EXACTLY one line: SCORE: N/max - reason."* Up to `eval_retries` times (default 1 → 2 tries).
+   It is a **fresh re-score of the same answer**, NOT a "here's your garbled score, resend the
+   number" message: we don't have a parseable score to correct, and feeding the garbled reply back
+   to let the model self-interpret is fragile and re-opens the misread risk. The nudge constrains the
+   *format* only; the judge grades the same answer again.
+2. **Still unparseable after the retries → fall back to a safe `Verdict(score=0)`.** Zero is below
+   `pass_score`, so `keep_going` routes to **refine** — i.e. improve the existing answer and try
+   again — bounded by `max_iters`.
+
+**Two failure kinds are handled differently on purpose:**
+
+| the judge call… | handling |
+|---|---|
+| returns a **blank / whitespace** reply (`EmptyResponseError`) | retried, then falls back to 0 (transient) |
+| returns **unparseable / out-of-range** text | retried with the format nudge, then falls back to 0 |
+| raises a **config/auth error** (e.g. bad key, `LLM_MAX_TOKENS=abc`) | **propagates and fails loud** — a real misconfiguration is never masked as a score of 0 |
+
+**Honest trade-off of the 0-fallback:** if the *answer* was fine but the *judge* merely misformatted
+its reply, scoring it 0 triggers an (unnecessary) refine of a good answer. We accept that because it
+is **safe** (a garbled verdict can never count as "good enough" and reach the human), **bounded**
+(`max_iters`), and **rare** (a well-prompted judge on the one-line format almost always parses first
+try). The parser is **fail-closed**: anything it can't read cleanly becomes a retry, then a 0 — never
+a lucky passing number. (The line-form fallback is also hardened against garbled numerics like
+`18e3` or a malformed denominator like `18/18e3` — those are rejected, not misread; see
+`parse_verdict`.)
 
 ---
 
