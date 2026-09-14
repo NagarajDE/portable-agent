@@ -16,7 +16,7 @@ so the run escalates rather than earning a passing score for answering a questio
 All offline: worker/judge/SQL are test doubles; the live Cortex call is not exercised here.
 """
 import engine.graph as G
-from engine.graph import build_graph, initial_state, _keeps_subject, _keeps_pinned
+from engine.graph import build_graph, initial_state, _keeps_subject, _keeps_pinned, _content_words
 from engine.sql_tool import no_data, is_no_data, data_hint, looks_all_zero, CortexAnalystTool
 
 
@@ -198,7 +198,11 @@ def test_off_subject_reformulation_is_discarded(monkeypatch):
 
 
 def test_narrowing_reformulation_is_accepted(monkeypatch):
-    # The guard must not block a LEGITIMATE narrowing: same subject, smaller scope.
+    # The guard must not block a rewrite that PRESERVES the core measure. Here the measure noun
+    # 'contract value' survives, so the drop of the 'top 10' rank is accepted and the run recovers.
+    # KNOWN RESIDUAL (F2): dropping the 'active' filter is a broadening the measure check does NOT
+    # catch (any-overlap on the measure, so 'contract' surviving is enough) -- the prompt-level
+    # NO_REFORMULATION refusal is the guard for that, not this deterministic check.
     monkeypatch.setattr(G, "load_config", lambda uc: {**_CFG, "max_data_retries": 1})
     w = _Cap("What is the total contract value by supplier?", "Grounded answer from the rows.")
     judge = _JudgeSpy("SCORE: 18/18 - grounded")
@@ -217,17 +221,24 @@ def test_keeps_subject_helper():
     assert _keeps_subject("how many widgets", "count of widgets in stock")
     assert _keeps_subject("how many widgets are in stock?", "count of widget inventory")  # plural fold
     assert _keeps_subject("what is the total?", "what is the grand total?")   # nothing to check -> open
-    # short (<=3-letter) subject nouns are visible now (floor is 3, not 4): a measure swap with NO
-    # shared dimension is caught. NOTE the residual: a swap that KEEPS its dimension still reads as kept.
+    # short (<=3-letter) subject nouns are visible (floor is 3, not 4): a measure swap is caught.
     assert not _keeps_subject("total tax", "total fees")
-    assert _keeps_subject("total tax by region", "total fees by region")   # dimension shared -> passes
+    # F3: the check is on the MEASURE (part before 'by/per/...'), NOT the whole question, so a swap
+    # that keeps only the DIMENSION is now caught -- 'department'/'region' surviving is not enough.
+    assert not _keeps_subject("total tax by region", "total fees by region")
+    assert not _keeps_subject("employee salary by department", "inventory value by department")
     # -y/-ies singular<->plural now folds to a common stem, so a legit re-pluralization is NOT drift
     assert _keeps_subject("average salary by team", "salaries by team")
     assert _keeps_subject("spend by category", "spend by categories")
+    # F5: short ALL-CAPS acronyms are visible now (were invisible under the >=3-letter floor)
+    assert "it" in _content_words("IT spend") and "hr" in _content_words("HR headcount")
     # a PINNED identifier may not be silently dropped (that would widen the population)
     assert not _keeps_pinned("on-hand balance for plant ZZ999", "on-hand balance by plant")
     assert _keeps_pinned("on-hand balance for plant ZZ999", "current balance for plant zz999")
     assert _keeps_pinned("top 10 suppliers by value", "suppliers by value")   # a rank is not a filter
+    # F1: EVERY pinned id must survive (subset), so dropping one of several is caught, not masked
+    assert not _keeps_pinned("compare PO123 and PO456", "show PO123 only")
+    assert _keeps_pinned("compare PO123 and PO456", "PO123 versus PO456 by month")
     # documented tradeoff (SAFE direction): a re-expressed period code reads as dropped -> escalates
     assert not _keeps_pinned("FY26 spend by vendor", "fiscal 2026 spend by vendor")
 

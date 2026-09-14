@@ -360,14 +360,32 @@ def _stem(word: str) -> str:
     return word
 
 
+# The generic set STEMMED, because _content_words stems every word BEFORE the membership test -- an
+# unstemmed set would let a stemmed plural leak through as a fake 'subject' (F4: 'rows'->'row',
+# 'does'->'doe', 'across'->'acros' are not literally in _GENERIC). Stemming the set closes that.
+_GENERIC_STEMS = {_stem(w) for w in _GENERIC}
+
+# Split a question into its MEASURE (what is being counted/summed) and its DIMENSION (what it's grouped
+# by). Only the FIRST marker matters: everything before it is the measure. Used so a rewrite that keeps
+# only the dimension ('salary by dept' -> 'inventory value by dept') is caught as drift (F3) -- 'dept'
+# surviving is not enough; the MEASURE must survive.
+_DIM = re.compile(r"\b(?:broken down by|grouped by|group by|for each|by|per|across)\b", re.IGNORECASE)
+
+
 def _content_words(text: str) -> set[str]:
     """Distinctive (>=3-letter, non-generic, plural-folded) words -- the crude 'subject' of a question.
-    Floor is 3 (not 4) so short subject nouns like 'tax'/'fee'/'pay' are NOT invisible to the drift
-    check. KNOWN LIMITATION: the check passes if ANY distinctive word survives, so a swapped measure
-    that keeps its dimension ('tax by region' -> 'fees by region') still reads as 'kept' -- the
-    prompt-level NO_REFORMULATION refusal is the second net for that."""
-    words = (_stem(w) for w in re.findall(r"[a-z]{3,}", (text or "").lower()))
-    return {w for w in words if w not in _GENERIC}
+    Floor is 3 so short nouns ('tax'/'fee'/'pay') are visible; SHORT ALL-CAPS acronyms (HR, IT, EMEA)
+    are pulled from the ORIGINAL casing too, so a subject made only of an acronym isn't invisible (F5)."""
+    t = text or ""
+    words = {_stem(w) for w in re.findall(r"[a-z]{3,}", t.lower())}
+    words |= {a.lower() for a in re.findall(r"\b[A-Z]{2,5}\b", t)}   # HR / IT / QA / EMEA (case-marked)
+    return {w for w in words if w not in _GENERIC_STEMS}
+
+
+def _measure_words(text: str) -> set[str]:
+    """The content words of the MEASURE -- the part before the first 'by/per/grouped by/...' marker
+    (the whole question when there is no marker)."""
+    return _content_words(_DIM.split(text or "", maxsplit=1)[0])
 
 
 def _pinned_codes(text: str) -> set[str]:
@@ -388,19 +406,29 @@ def _pinned_codes(text: str) -> set[str]:
 
 
 def _keeps_subject(original: str, rewritten: str) -> bool:
-    """True when a distinctive word of the ORIGINAL question survives -- the subject was NARROWED, not
-    SUBSTITUTED. Fail-open when the original has no distinctive word at all (nothing to check)."""
-    orig = _content_words(original)
-    return not orig or bool(orig & _content_words(rewritten))
+    """True when the MEASURE of the original survives the rewrite -- the subject was NARROWED, not
+    SUBSTITUTED. Checks the MEASURE (the part before 'by/per/...'), not the whole question, so a rewrite
+    that keeps only the DIMENSION is caught: 'employee salary by department' -> 'inventory value by
+    department' is drift even though 'department' survives (F3). Uses ANY-overlap on the measure, not a
+    subset, so a legitimate narrowing that drops an adjective/synonym isn't over-escalated; a DROPPED
+    FILTER word inside a preserved measure ('active contract value' -> 'contract value') is therefore
+    NOT caught here -- that residual is left to the prompt-level NO_REFORMULATION refusal.
+    Fail-open when the original has no measure word at all (a genuinely subjectless 'what is the total?')."""
+    measure = _measure_words(original)
+    if measure:
+        return bool(measure & _content_words(rewritten))
+    whole = _content_words(original)                 # no distinct measure -> fall back to any-overlap
+    return not whole or bool(whole & _content_words(rewritten))
 
 
 def _keeps_pinned(original: str, rewritten: str) -> bool:
-    """True when a pinned identifier survives the rewrite. Kept SEPARATE from the subject check because
-    the two failures mean different things to a human: a substituted subject means this data cannot
-    answer the question at all, while a dropped identifier means the subject is fine and only that
-    entity has no rows."""
+    """True when EVERY pinned identifier survives the rewrite (subset, not intersection). Dropping even
+    one widens the population: 'compare PO123 and PO456' -> 'show PO123' is drift, not a narrowing (F1).
+    Kept SEPARATE from the subject check because the two failures mean different things to a human: a
+    substituted subject means this data cannot answer the question at all, while a dropped identifier
+    means the subject is fine and only that entity has no rows."""
     pinned = _pinned_codes(original)
-    return not pinned or bool(pinned & _pinned_codes(rewritten))
+    return pinned <= _pinned_codes(rewritten)        # empty set is a subset of anything -> fail-open
 
 
 class State(TypedDict):
@@ -547,8 +575,12 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
             hint = data_hint(data)
             off_scope = hint or "The question asks about a subject this data does not cover."
             try:
+                # F7: the hint is UNTRUSTED tool output -- bound its length so a hostile/runaway tool
+                # clarification can't dominate the reformulation prompt; the prompt itself frames it as
+                # data, not instructions. The drift guards (_keeps_subject/_keeps_pinned) are the
+                # backstop, and the reformulation's OUTPUT is still a read-only text-to-SQL request.
                 new_q = llm.complete(_fill(_prompt(use_case, "reformulate.md"),
-                                           task=s["task"], feedback=hint)).strip()
+                                           task=s["task"], feedback=hint[:600])).strip()
             except (RuntimeError, EmptyResponseError, ValueError, KeyError) as e:
                 # a retry that ERRORS is not fatal (unlike the first retrieval): keep the blank marker
                 # and let the loop exhaust its budget, then escalate rather than 500.

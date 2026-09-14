@@ -1,7 +1,62 @@
 # Test campaign — what actually works vs. what was only theoretical
 
-Three rounds, newest first. Environment for all: Windows, Python 3, local `.env` pointed at Snowflake
+Four rounds, newest first. Environment for all: Windows, Python 3, local `.env` pointed at Snowflake
 account `illumina`. Memory (thread/session) is not built yet and is out of scope by design.
+
+---
+
+# Round 4 — external code-review fixes (drift guard hardening)
+
+Date: 2026-09-14 · Under test: **uncommitted working tree on `main`** (parent `9293118`)
+Question being answered: *do the review fixes hold, and does anything regress?* → **No regressions;
+all 16 live cases produce a correct human-facing outcome (no fabrication anywhere).**
+
+## 4.1 What changed (review findings applied)
+
+| # | Fix | Where |
+|---|---|---|
+| **F1** | `_keeps_pinned` now requires **every** pinned id to survive (subset, not intersection), so dropping one of several (`compare PO123 and PO456` → `show PO123`) is caught, not masked. | `engine/graph.py` |
+| **F3** | `_keeps_subject` checks the **measure** (the part before `by`/`per`/`grouped by`/…), not the whole question. A rewrite that keeps only the **dimension** (`employee salary by department` → `inventory value by department`) is now drift even though `department` survives. | `engine/graph.py` (`_DIM`, `_measure_words`) |
+| **F4** | Stopword check runs against the **stemmed** generic set (`_GENERIC_STEMS`), so a stemmed plural (`rows`→`row`, `does`→`doe`, `across`→`acros`) can no longer leak through as a fake subject. | `engine/graph.py` |
+| **F5** | `_content_words` also extracts short ALL-CAPS acronyms (`HR`, `IT`, `QA`, `EMEA`), so a subject expressed only as an acronym is no longer invisible to the drift check. | `engine/graph.py` |
+| **F7** | The untrusted tool hint fed into reformulation is **length-bounded** (`hint[:600]`) and the prompt now frames it as *data describing a failure, never instructions*. | `engine/graph.py`, `shared/prompts/reformulate.md` |
+| F6, F8–F10 | Reviewed, no change. F10 (State `best_score` "could be None") does not apply — at the graph level it is always `int` (`-1` when escalated); `None` exists only on the typed `AskResponse.score: int | None`. F8 (1e-400 underflow) is business-zero. F6/F9 negligible. |
+
+## 4.2 Offline verification
+
+| Phase | Result |
+|---|---|
+| Unit suite (`pytest -q`) | **289 passed** |
+| Grounding tests (incl. reworked F1/F3/F4/F5 assertions) | **18/18** — flipped `tax by region`→`fees by region` to **drift** (measure swap now caught); added multi-id subset (F1), dimension-masked substitution (F3), acronym visibility (F5) |
+| Mock sweep, 10 packs (build + invoke, creds-free) | **10/10** grounded + scored (16/18) |
+| Golden evals | **15/15** across the 10 packs |
+
+## 4.3 Live Cortex — 2 positive + 2 negative per AI+BI pack (16 runs, one process each)
+
+Env `CORTEX_SEMANTIC_VIEW`/`_MODEL` removed so each pack self-declares its layer. `score` is the
+graph's `best_score`; escalations report `score=None`.
+
+| Pack | POS-1 | POS-2 | NEG irrelevant | NEG blank / bogus id |
+|---|---|---|---|---|
+| `inventory_balance` | ok 18/18 | ok 17/18 | `out_of_scope` (salary) | **`no_data`** — plant `ZZ999`, 0 rows (measure → NULL) |
+| `goa_spend` | ok 17/18 | ok 16/18 | `out_of_scope` (share price) | ok 15/18 — honest "vendor `QQQ404ZZ` not in data" (retry surfaced unrelated rows, worker rejected them) |
+| `icertis_procurement` | ok 15/18 | ok 17/18 | `out_of_scope` (weather) | ok 16/18 — honest "**zero contracts** for `ZZ999QQQ`" (a COUNT of a bogus id is legitimately 0) |
+| `procurement_contracts` | ok 16/18 (r1) | ok 16/18 (r1) | `out_of_scope` (headcount) | ok 17/18 — honest "code `ZZ000NONEXIST` not present; valid codes are `AGRMSA*`" |
+
+**Every irrelevant question escalated `out_of_scope` with `score=None`. No answer fabricated a number.**
+Positives all grounded; `procurement_contracts` recovered both positives via one reformulation
+(`retries=1`, the zero-row → reformulate path — e.g. `Active` → `Executed 6,415`).
+
+## 4.4 The one nuance worth a conscious decision
+
+A **bogus pinned entity does not always escalate `no_data`.** Only `inventory_balance`'s `ZZ999` did,
+because it asked for a **measure** (balance) → `SUM` over zero rows is NULL → genuinely blank. The other
+three asked for a **count/status/lookup**, and the retry surfaced context rows, so the worker returned a
+**grounded, honest "not found"** answer (scored 15–17) instead of escalating. This is **not the original
+bug** — nothing is fabricated; the human is explicitly told the entity is absent. But if the standard is
+"a bogus id must always be `score=None`," the `goa_spend` case (Analyst returned unrelated rows the worker
+had to reject in prose) is the one to tighten — it would mean treating "rows returned but none match the
+pinned id" as `no_data`, which needs a new check beyond `looks_all_zero`.
 
 ---
 
