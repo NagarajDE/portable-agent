@@ -30,7 +30,15 @@ Copy `usecases/_TEMPLATE/` to start — it's a runnable minimal pack. See sectio
 ### What each file is for
 - **config.yaml** — the knobs: `inherits: [shared]`, a human `name`, a `sample_task`, and optionally
   `tools:`, scoring (`max_score`, `pass_score`/`threshold`), `max_iters`, `eval_retries`, `max_stall`,
-  and `exclude_shared_skills:` (section 4).
+  `max_data_retries`, `zero_is_no_data`, and `exclude_shared_skills:` (section 4). The two blank-data
+  knobs:
+  - **`max_data_retries`** (default `1`, max `5`, `0` = off) — how many times a **blank** retrieval may be
+    rephrased and re-tried before the run escalates unscored. See
+    [retries-explained.md](retries-explained.md).
+  - **`zero_is_no_data`** (default `false`) — also treat a **single all-zero/NULL row** (`COUNT(*) = 0`,
+    `SUM(...) = NULL`) as blank. Opt-in per pack because it is indistinguishable from a genuine zero:
+    turn it on where `0` always means "a filter or status label matched nothing" (all four AI+BI packs
+    set it), leave it off where `0` is a legitimate answer.
 - **semantic_layer.yaml** — *Analyst/Genie packs only.* Names the native semantic layer this pack
   queries (Snowflake view / stage-YAML, or Databricks metric-view / Genie-space). Its **presence marks
   the pack as AI+BI-backed**; absent means the engine never looks for one. Read from the pack, never

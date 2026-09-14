@@ -101,6 +101,15 @@ runs the **read-only** ones (with `${task}` substituted into each tool's `input`
 labeled, bounded observations. Side-effecting tools are **skipped** by the auto-run path (they need
 explicit approval, which the deterministic observe step never grants).
 
+If **not one** tool produced usable output — none declared, all write-only, all failed, all empty —
+`gather_context` returns the **blank-retrieval sentinel** instead of the prose `"No tool observations."`,
+carrying those notes as its hint. That is the same signal as zero SQL rows, so this path gets the same
+treatment: rephrase the question, sweep the tools once more, then escalate unscored rather than let the
+judge grade an answer written from nothing (see [retries-explained.md](retries-explained.md)). Two
+deliberate exceptions: `tools: []` — a **deliberately toolless** agent that answers from skills alone —
+is never escalated, and `tool_mode: agentic` is excluded from the retry because it already self-corrects
+across its own `max_tool_steps` (it does not yet mark a blank gather at all — a known gap).
+
 A pack opts in with a `tools:` list in its `config.yaml` (fully additive — omit it for the legacy
 path):
 

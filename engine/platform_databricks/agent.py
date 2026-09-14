@@ -80,9 +80,16 @@ class PortableAgent(ResponsesAgent):
         remember_run(final, self.use_case)               # episodic capture (best-effort, no-op unless MEMORY_STORE set)
         # Use the typed Responses output item (not a raw dict) so downstream MLflow/serving
         # clients get a spec-compliant response.
+        # An escalated run is not scored: surface the REASON and score=None so a client never reads a
+        # "pass" for an answer that had no data behind it (see engine/graph.py).
+        status = final.get("status") or "ok"         # "" -> ok; else the escalation REASON (no_data |
+                                                     #   out_of_scope), passed through for the client
         return ResponsesAgentResponse(
             output=[self.create_text_output_item(final["best_answer"], id=final["run_id"])],
-            custom_outputs={"run_id": final["run_id"]})
+            custom_outputs={"run_id": final["run_id"], "status": status,
+                            "grounded": final.get("grounded", True),
+                            "data_retries": final.get("data_retries", 0),
+                            "score": None if status != "ok" else final["best_score"]})
 
 
 set_model(PortableAgent())

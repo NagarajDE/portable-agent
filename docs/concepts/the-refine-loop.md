@@ -8,6 +8,12 @@ This explains the generate→evaluate→refine loop in [`engine/graph.py`](../..
 4. **What "refine" actually re-runs** — it improves the existing answer, it does *not* restart (§5).
 5. **What happens when the judge's verdict can't be parsed** — retry the judge, then fail safe (§6).
 
+> **Confused by "refine" vs. the other retries?** The loop retries in three different places for
+> three different reasons — reformulate the *question* (on blank data), refine the *answer* (on a low
+> score), re-review the *score* (on a garbled verdict). If those blur together, read
+> [**retries-explained.md**](retries-explained.md) first — it's a comparison table + one worked
+> question that hits all three. This doc then goes deep on **refine** specifically.
+
 ---
 
 ## 1. The loop at a glance

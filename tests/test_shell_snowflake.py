@@ -22,7 +22,10 @@ def client(monkeypatch):
 
 def test_invoke_returns_answer_score_runid(client):
     r = client.post("/invoke", json={"question": "duplicate lots?"}).json()
-    assert set(r) == {"answer", "score", "run_id"} and len(r["run_id"]) == 12
+    assert set(r) == {"answer", "score", "status", "grounded", "data_retries", "run_id"} and len(r["run_id"]) == 12
+    # a normal mock run is grounded and scored (the no-data escalation would give status=no_data,
+    # score=None -- see tests/test_grounding.py for that path).
+    assert r["status"] == "ok" and r["grounded"] is True and isinstance(r["score"], int)
 
 
 def test_feedback_recorded_with_mock_memory(client):

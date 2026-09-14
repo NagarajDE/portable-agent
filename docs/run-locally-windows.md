@@ -45,6 +45,18 @@ py -3 run_local.py dq_qals
 
 You should see the loop print a climbing score ending in `BEST SCORE : 18/18`.
 
+If retrieval came back empty, you get a **reason instead of a score** — the run was escalated, not
+answered, and it is never scored:
+
+```
+RESULT     : NO USABLE DATA — the query ran and matched nothing (escalated, not scored — retries: 1)
+RESULT     : OUT OF SCOPE — this data cannot answer that question (escalated, not scored — retries: 1)
+```
+
+`no_data` means check the identifier / filters / freshness; `out_of_scope` means this pack's data can't
+answer that question at all. Both still print the agent's honest explanation as `MESSAGE`. See
+[concepts/retries-explained.md](concepts/retries-explained.md).
+
 ---
 
 ## 1. What you need from Snowflake (one time)

@@ -106,7 +106,7 @@ def test_toolless_pack_uses_neither_tools_nor_sql(monkeypatch):
                     verbose=False)
     g.invoke(initial_state("q"))
     assert spy.calls == []                                     # SQL path NOT taken
-    assert "No tool observations." in worker.prompts[0]        # and no tool output
+    assert "answered from skills alone" in worker.prompts[0]    # toolless placeholder, not a tool obs
 
 
 def test_tools_run_once_in_generate_not_per_refine(monkeypatch):

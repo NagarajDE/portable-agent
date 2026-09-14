@@ -3,3 +3,6 @@
 inherits: [shared]
 name: "GOA indirect spend analytics"
 sample_task: "What are the top 10 vendors by spend, and what % of total does each represent?"
+# A lone all-zero/NULL row is a filter that matched nothing (SUM over no rows), never a real spend
+# figure -- escalate it as no_data rather than scoring an "it's NULL" answer.
+zero_is_no_data: true

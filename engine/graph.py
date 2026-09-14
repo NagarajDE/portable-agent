@@ -21,7 +21,8 @@ from langgraph.graph import StateGraph, END
 
 from engine.llm_client import (get_llm_client, get_eval_client, model_summary,
                                 LLMClient, EmptyResponseError)
-from engine.sql_tool import get_sql_tool, SQLTool
+from engine.sql_tool import (get_sql_tool, SQLTool, is_no_data, data_hint, no_data,
+                             looks_all_zero)
 from engine.tracing import instrument       # observability is applied from OUTSIDE the nodes
 from engine.tools import (load_tools, gather_context, describe_tools, run_agentic,   # generic tool layer (SQL = one tool)
                           strict_bool)
@@ -322,6 +323,86 @@ def parse_verdict(raw: str, max_score: int) -> Verdict:
     return verdict
 
 
+# A reformulation must NARROW a question, never SUBSTITUTE it. Two independent guards, because the
+# model that produced the blank cannot be trusted to police its own scope: (1) it may REFUSE with this
+# token when the subject simply isn't in the data (shared/prompts/reformulate.md), and (2) the engine
+# checks DETERMINISTICALLY that a distinctive word of the original survived. The failure this prevents
+# was observed live: "average employee salary by department" came back as "average inventory value per
+# plant", which RETURNS ROWS -> looks grounded -> the judge scored the honest "not in this data" answer
+# 16/18. Answering a question nobody asked, from real rows, is worse than reporting the gap.
+_REFUSE = "NO_REFORMULATION"
+# Words too generic to prove the subject survived. Kept deliberately small; every word added makes the
+# guard STRICTER, and a false "drifted" verdict is SAFE (the run escalates to a human) while a false
+# "kept it" is the bug itself. The >=3-letter tier is here BECAUSE the content-word floor is 3 (so a
+# short subject like 'tax'/'fee' is visible): without it, pure function words ('the', 'per', 'top')
+# would look distinctive. Only ever add true function/rank words here -- never a domain noun.
+_GENERIC = {
+    "what", "which", "when", "where", "many", "much", "total", "average", "list", "show", "give",
+    "count", "value", "values", "amount", "amounts", "number", "numbers", "percent", "percentage",
+    "share", "data", "field", "fields", "record", "records", "rows", "report", "across", "each",
+    "have", "does", "were", "been", "with", "from", "that", "this", "there", "their", "your",
+    "last", "over", "into", "most", "than", "then", "also", "only", "some", "them", "they", "will",
+    # >=3-letter function / rank words (floor is 3): dropping any of these is never a subject change.
+    "the", "and", "for", "are", "was", "has", "had", "our", "out", "per", "who", "you", "its",
+    "all", "any", "one", "two", "top", "how", "why", "did", "not", "but", "may", "can", "via",
+}
+
+
+def _stem(word: str) -> str:
+    """Fold a trailing plural to a common stem so a plural<->singular rewrite counts as the SAME subject
+    ('vendors'->'vendor', 'salaries'->'salary', 'categories'->'category'). Linguistically rough on
+    purpose: the original and the rewrite are stemmed IDENTICALLY, so the comparison stays consistent
+    even when the stem isn't a real word ('analysis'->'analysi' on both sides still matches itself)."""
+    if len(word) >= 6 and word.endswith("ies"):
+        return word[:-3] + "y"                        # salaries -> salary, categories -> category
+    if len(word) >= 4 and word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]                             # vendors -> vendor, fees -> fee (address stays)
+    return word
+
+
+def _content_words(text: str) -> set[str]:
+    """Distinctive (>=3-letter, non-generic, plural-folded) words -- the crude 'subject' of a question.
+    Floor is 3 (not 4) so short subject nouns like 'tax'/'fee'/'pay' are NOT invisible to the drift
+    check. KNOWN LIMITATION: the check passes if ANY distinctive word survives, so a swapped measure
+    that keeps its dimension ('tax by region' -> 'fees by region') still reads as 'kept' -- the
+    prompt-level NO_REFORMULATION refusal is the second net for that."""
+    words = (_stem(w) for w in re.findall(r"[a-z]{3,}", (text or "").lower()))
+    return {w for w in words if w not in _GENERIC}
+
+
+def _pinned_codes(text: str) -> set[str]:
+    """Literal identifiers the user PINNED: tokens mixing letters and digits (ZZ999, PO12345, QQQ404ZZ).
+    Silently dropping one WIDENS the population the answer is about, so a rewrite that loses every
+    pinned code is answering about a different set of rows.
+
+    Known limitations, ALL in the SAFE direction (they escalate as no_data, never false-pass):
+      * a bare-number filter (a year like 2026) is NOT pinned -- 'top 10' is a rank, not a filter, and
+        there is no way to tell the two apart. The subject check is the only guard there.
+      * a period code (FY26, Q1FY26, 1H26) IS pinned, so if the rewrite RE-EXPRESSES it in words
+        ('FY26' -> 'fiscal 2026') the match fails and the run escalates with an honest 'no rows for
+        that period' message instead of recovering. Accepted on purpose: exempting period codes would
+        let a rewrite DROP the period entirely ('FY26 spend' -> 'spend', all years) and pass -- the
+        exact widening false-pass this guard exists to stop."""
+    pat = r"\b(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{3,}\b"
+    return {w.upper() for w in re.findall(pat, text or "")}
+
+
+def _keeps_subject(original: str, rewritten: str) -> bool:
+    """True when a distinctive word of the ORIGINAL question survives -- the subject was NARROWED, not
+    SUBSTITUTED. Fail-open when the original has no distinctive word at all (nothing to check)."""
+    orig = _content_words(original)
+    return not orig or bool(orig & _content_words(rewritten))
+
+
+def _keeps_pinned(original: str, rewritten: str) -> bool:
+    """True when a pinned identifier survives the rewrite. Kept SEPARATE from the subject check because
+    the two failures mean different things to a human: a substituted subject means this data cannot
+    answer the question at all, while a dropped identifier means the subject is fine and only that
+    entity has no rows."""
+    pinned = _pinned_codes(original)
+    return not pinned or bool(pinned & _pinned_codes(rewritten))
+
+
 class State(TypedDict):
     task: str
     data: str
@@ -334,6 +415,10 @@ class State(TypedDict):
     stall: int                # consecutive refines that did NOT beat best_score (no-progress stop)
     iterations: int
     refine_failed: bool       # a refine worker call raised -> route straight to END (skip re-evaluate)
+    grounded: bool            # did retrieval yield usable data? False -> escalate (skip the judge)
+    status: str               # ""=normal; "no_data"=retrieval blank after retries; "out_of_scope"=the
+                              #   question isn't answerable from this data at all. Both -> a human.
+    data_retries: int         # reformulate-and-retry attempts spent before giving up (observability)
     instructions: str         # per-request OPERATOR instructions (applied only if the pack allows)
     run_id: str               # per-run id; the join key for observability (see engine/tracing.py)
 
@@ -354,15 +439,25 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
                                                        # refine-from-best "grind to max_iters" case.
     tool_mode = str(cfg.get("tool_mode", "deterministic")).strip().lower()   # deterministic | agentic
     max_tool_steps = cfg.get("max_tool_steps", 4)      # agentic: max model-chosen tool calls per run
+    max_data_retries = cfg.get("max_data_retries", 1)  # blank retrieval -> reformulate+re-query this many
+                                                       # times before escalating as no_data (0 = at once)
+    # OPT-IN: treat a single all-zero/NULL row (COUNT(*)=0, SUM(...)=NULL) as a blank retrieval. Default
+    # OFF because it is indistinguishable from a TRUE zero -- escalating would be WRONG for a pack where
+    # "0" is a real answer. Turn it on for packs where 0 almost always means a filter or status label
+    # matched nothing (see engine/sql_tool.py: looks_all_zero).
+    zero_is_no_data = strict_bool(cfg.get("zero_is_no_data"), False)
     for _name, _val, _min in (("max_score", max_score, 1), ("pass_score", pass_score, 1),
                               ("max_iters", max_iters, 0), ("eval_retries", eval_retries, 0),
-                              ("max_stall", max_stall, 0), ("max_tool_steps", max_tool_steps, 0)):
+                              ("max_stall", max_stall, 0), ("max_tool_steps", max_tool_steps, 0),
+                              ("max_data_retries", max_data_retries, 0)):
         if type(_val) is not int or _val < _min:       # `type is not int` also rejects bools
             raise ValueError(f"{_name} must be an integer >= {_min}")   # pass_score>=1: 0 would let a fallback-0 "pass"
     if tool_mode not in ("deterministic", "agentic"):
         raise ValueError("tool_mode must be 'deterministic' or 'agentic'")
     if max_tool_steps > 10:                             # bound cost/latency of the gathering loop
         raise ValueError("max_tool_steps must be <= 10")
+    if max_data_retries > 5:                            # bound cost/latency of the reformulate-retry loop
+        raise ValueError("max_data_retries must be <= 5")
     if pass_score > max_score:
         raise ValueError("pass_score must be <= max_score")
     if max_iters > 10:                                 # keep graph steps under LangGraph's default recursion limit (25)
@@ -410,24 +505,94 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
 
     log(f"  [models]   {model_summary(cfg_models)}")
 
-    def generate(s: State) -> State:
+    def _retrieve(question: str, run_id: str) -> str:
         # Context source. Legacy: the single SQL call (unchanged). Deterministic tools: the engine
         # runs the declared READ-ONLY tools (model never selects -> injection-safe). Agentic tools:
         # the model chooses which read-only tools to call (opt-in; weaker injection property), still
-        # via dispatch(). Either tools path then feeds observations into this same `generate`.
+        # via dispatch(). Each path may return the NO_DATA sentinel to mark a blank retrieval.
         if use_sql:
-            data = sql.ask(s["task"])
+            out = sql.ask(question)
         elif tool_mode == "agentic":
-            data = run_agentic(s["task"], loaded_tools, llm, act_template,
-                               s.get("run_id", "-"), max_tool_steps)
+            out = run_agentic(question, loaded_tools, llm, act_template, run_id, max_tool_steps)
+        elif not loaded_tools:
+            # `tools: []` is a DELIBERATELY toolless agent (answers from skills alone). It has no
+            # retrieval, so there is no such thing as a blank one -- never escalate it. Distinct wording
+            # from gather_context's "No tool observations." hint so the two paths can't be confused.
+            out = "No tools configured; answered from skills alone."
         else:
-            data = gather_context(s["task"], loaded_tools, s.get("run_id", "-"))
+            out = gather_context(question, loaded_tools, run_id)
+        if zero_is_no_data and looks_all_zero(out):    # opt-in: a lone row of zeros is not evidence
+            return no_data("The query returned a single all-zero/NULL row -- a filter or a status "
+                           "label probably matched nothing. Check which values are actually present.")
+        return out
+
+    def generate(s: State) -> State:
+        run_id = s.get("run_id", "-")
+        # First retrieval is UNGUARDED: a hard error (bad SQL, network) is fatal, matching the
+        # "a failed first generate is fatal" rule -- there is nothing to fall back to.
+        data = _retrieve(s["task"], run_id)
+        retries = 0
+        # A BLANK retrieval does NOT prove the data is missing -- it may be a misread question or a
+        # wrong/empty query. On the paths that fire EXACTLY ONCE (the single SQL call, the deterministic
+        # tool sweep) give it a bounded chance to self-correct: reformulate the question from the tool's
+        # hint and re-retrieve, BEFORE concluding a genuine gap. If that recovers data it was a misread;
+        # if it stays blank it is a real gap and the run escalates. Agentic is excluded -- it already had
+        # `max_tool_steps` chances to self-correct.
+        # The rewrite is NOT trusted blindly: a REFUSAL or an off-subject DRIFT is discarded (see
+        # _keeps_subject) so the run escalates instead of answering a different, answerable question.
+        can_retry = use_sql or tool_mode == "deterministic"
+        reason = "no_data"                                # why we'd escalate: blank vs. wrong question
+        while can_retry and is_no_data(data) and retries < max_data_retries:
+            retries += 1
+            hint = data_hint(data)
+            off_scope = hint or "The question asks about a subject this data does not cover."
+            try:
+                new_q = llm.complete(_fill(_prompt(use_case, "reformulate.md"),
+                                           task=s["task"], feedback=hint)).strip()
+            except (RuntimeError, EmptyResponseError, ValueError, KeyError) as e:
+                # a retry that ERRORS is not fatal (unlike the first retrieval): keep the blank marker
+                # and let the loop exhaust its budget, then escalate rather than 500.
+                log(f"  [retry {retries}] failed: {e}; keeping no-data")
+                data = no_data(hint)
+                continue
+            if not new_q or new_q.upper().lstrip("*_# ").startswith(_REFUSE):
+                log(f"  [retry {retries}] reformulation REFUSED: subject not in this data")
+                data, reason = no_data(off_scope), "out_of_scope"
+                break                                  # a refusal is final -- don't burn more retries
+            kept_subject = _keeps_subject(s["task"], new_q)   # evaluate each guard ONCE
+            kept_pinned = _keeps_pinned(s["task"], new_q)
+            if not kept_subject or not kept_pinned:
+                # WHY it drifted decides what the human is told. Subject SUBSTITUTED -> this data can't
+                # answer the question at all. Identifier DROPPED -> the subject is fine, that entity
+                # just has no rows; widening it would answer about a different population.
+                reason = "out_of_scope" if not kept_subject else "no_data"
+                log(f"  [retry {retries}] reformulation DRIFTED ({reason}) -> {new_q}")
+                data = no_data(off_scope if reason == "out_of_scope" else
+                               (hint or "No rows matched the identifier in the question."))
+                break                                  # would answer a DIFFERENT question -> escalate
+            log(f"  [retry {retries}] reformulated -> {new_q}")
+            try:
+                data = _retrieve(new_q, run_id)
+            except (RuntimeError, ValueError, KeyError) as e:
+                log(f"  [retry {retries}] re-retrieval failed: {e}; keeping no-data")
+                data = no_data(hint)
+        grounded = not is_no_data(data)
+        obs = data if grounded else data_hint(data)    # show the worker the hint, never the raw sentinel
         answer = llm.complete(_fill(_prompt(use_case, "generate.md"), instructions=instr_for(s),
-                                    task=s["task"], data=data, observations=data,
+                                    task=s["task"], data=obs, observations=obs,
                                     tools=tools_desc, skills=skills,
                                     exemplars=exemplars, revision=0))
-        log(f"  [generate] rev0 -> {answer}")
-        return {**s, "data": data, "answer": answer, "iterations": 0}
+        log(f"  [generate] rev0 (grounded={grounded}, retries={retries}) -> {answer}")
+        if not grounded:
+            # ESCALATE: keep the honest answer for the human, but it is NOT a scored/passing answer.
+            # best_score stays -1 (the judge never runs), and the surfaces report the REASON so a human
+            # can act: "no_data" (the query ran, nothing there -- check filters/freshness) vs.
+            # "out_of_scope" (this data can't answer that question -- ask a different agent). Neither
+            # is ever a score.
+            return {**s, "data": obs, "answer": answer, "best_answer": answer, "iterations": 0,
+                    "grounded": False, "status": reason, "data_retries": retries}
+        return {**s, "data": data, "answer": answer, "iterations": 0,
+                "grounded": True, "status": "", "data_retries": retries}
 
     def evaluate(s: State) -> State:
         # Ground the judge: give it the DATA the answer must be consistent with, so a
@@ -497,6 +662,11 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
             return "stop"
         return "refine"
 
+    def after_generate(s: State) -> str:
+        # No usable data after reformulate-and-retry -> hand the honest answer to a human as a distinct
+        # outcome; do NOT run the judge (it can't create data and must never award a pass on no data).
+        return "escalate" if not s.get("grounded", True) else "evaluate"
+
     def after_refine(s: State) -> str:
         # A failed refine ends the run immediately (best_* already preserved); a successful one goes
         # to evaluate to score the new revision. This makes the failed-refine path skip evaluate (H6).
@@ -509,7 +679,7 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     g.add_node("evaluate", instrument("evaluate", evaluate, use_case))
     g.add_node("refine", instrument("refine", refine, use_case))
     g.set_entry_point("generate")
-    g.add_edge("generate", "evaluate")
+    g.add_conditional_edges("generate", after_generate, {"evaluate": "evaluate", "escalate": END})
     g.add_conditional_edges("evaluate", keep_going, {"refine": "refine", "stop": END})
     g.add_conditional_edges("refine", after_refine, {"evaluate": "evaluate", "stop": END})
     return g.compile()
@@ -519,4 +689,5 @@ def initial_state(task: str, instructions: str = "") -> State:
     return {"task": task, "data": "", "answer": "", "feedback": "",
             "score": -1, "best_answer": "", "best_score": -1, "best_feedback": "",
             "stall": 0, "iterations": 0, "refine_failed": False,
+            "grounded": True, "status": "", "data_retries": 0,
             "instructions": instructions or "", "run_id": uuid.uuid4().hex[:12]}

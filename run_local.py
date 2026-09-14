@@ -33,9 +33,19 @@ def main():
     final = traced_invoke(app, initial_state(task), use_case)
     remember_run(final, use_case)                   # episodic capture (no-op unless MEMORY_STORE set)
     print("-" * 68)
-    # denominator is max_score (the score's scale), NOT threshold/pass_score (the stop bar)
-    print(f"BEST SCORE : {final['best_score']}/{cfg.get('max_score', 18)}")
-    print(f"BEST ANSWER: {final['best_answer']}\n")
+    if final.get("status"):
+        # Escalated, NOT answered: a human decides. Report WHICH problem it was -- "no_data" (the query
+        # ran and matched nothing: check filters/freshness) vs "out_of_scope" (this data cannot answer
+        # that question: ask a different agent). Printing a score here would be the bug we just fixed.
+        label = {"no_data": "NO USABLE DATA — the query ran and matched nothing",
+                 "out_of_scope": "OUT OF SCOPE — this data cannot answer that question"}.get(
+                     final["status"], final["status"])
+        print(f"RESULT     : {label} (escalated, not scored — retries: {final.get('data_retries', 0)})")
+        print(f"MESSAGE    : {final['best_answer']}\n")
+    else:
+        # denominator is max_score (the score's scale), NOT threshold/pass_score (the stop bar)
+        print(f"BEST SCORE : {final['best_score']}/{cfg.get('max_score', 18)}")
+        print(f"BEST ANSWER: {final['best_answer']}\n")
 
 if __name__ == "__main__":
     main()

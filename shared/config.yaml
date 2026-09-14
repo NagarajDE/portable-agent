@@ -6,6 +6,18 @@
 threshold: 15
 max_iters: 4
 eval_retries: 1        # extra judge re-asks if its verdict can't be parsed (total tries = 1 + this)
+max_data_retries: 1    # a BLANK retrieval (no rows / no SQL) may be a misread question, not a real gap:
+                       # reformulate the question and re-query this many times before escalating the run
+                       # for a human (never scored/passed). 0 = escalate immediately. Max 5.
+                       # The rewrite must still ask YOUR question: a refusal or an off-subject drift is
+                       # discarded and the run escalates (see engine/graph.py: _keeps_subject).
+                       # Two escalation reasons reach the human: status="no_data" (the query ran and
+                       # matched nothing -> check filters/freshness) and status="out_of_scope" (this
+                       # data cannot answer that question -> ask a different agent). Neither is scored.
+zero_is_no_data: false # OPT-IN: also treat a single all-zero/NULL row (COUNT(*)=0, SUM=NULL) as blank.
+                       # OFF by default because a true zero is a legitimate answer and escalating it
+                       # would be wrong. Turn on per pack where 0 nearly always means a filter or a
+                       # status label matched nothing.
 default_sql_tool: mock
 
 # OPERATOR INSTRUCTIONS (optional, additive). Behavioral/policy directives the answer must follow,

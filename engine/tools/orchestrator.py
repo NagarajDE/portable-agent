@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from engine.sql_tool import no_data          # shared blank-retrieval sentinel (stdlib-only module: no cycle)
 from engine.tools.base import ToolContext, Tool
 from engine.tools.dispatch import dispatch
 from engine.tools.registry import build_tool
@@ -96,19 +97,30 @@ def _tool_context(run_id: str) -> ToolContext:
 def gather_context(task: str, loaded: list[LoadedTool], run_id: str = "-") -> str:
     """Run the READ-ONLY tools and concatenate their labeled, bounded observations. A
     side-effecting tool is skipped here (it requires explicit approval, out of the auto path).
-    A failing tool degrades to a short note -- it never breaks the run."""
+    A failing tool degrades to a short note -- it never breaks the run.
+
+    Returns the NO_DATA sentinel when NOT ONE tool produced usable output (none declared, all
+    write-only, all failed, all empty). That is a BLANK retrieval exactly like zero SQL rows, and
+    this path fires ONCE, so the loop treats it identically: reformulate-and-retry, then escalate
+    rather than score an answer written from nothing. The notes ride along as the sentinel's hint,
+    so the worker still sees WHY there is no evidence."""
     ctx = _tool_context(run_id)
     blocks: list[str] = []
+    usable = 0                                        # observations carrying ACTUAL evidence
     for lt in loaded:
         if not lt.tool.spec.read_only:                # least privilege: never auto-run writes
             continue
         result = dispatch(lt.tool, _render(lt.input_template, task), ctx)
-        if result.ok:
+        if result.ok and (result.output or "").strip():
             blocks.append(f"[{lt.label}]\n{result.output}")
+            usable += 1
+        elif result.ok:                                # ran fine, said nothing -> not evidence
+            blocks.append(f"[{lt.label}] (no output)")
         else:
             kind = result.error.kind if result.error else "error"
             blocks.append(f"[{lt.label}] (unavailable: {kind})")
-    return "\n\n".join(blocks) if blocks else "No tool observations."
+    text = "\n\n".join(blocks)
+    return text if usable else no_data(text or "No tool observations.")
 
 
 def describe_tools(loaded: list[LoadedTool]) -> str:

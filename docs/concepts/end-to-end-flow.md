@@ -43,6 +43,13 @@ user question
 │  → data / observations      │
 └──────────────┬──────────────┘
                ▼
+        got usable data? ─── no ──►  reformulate the QUESTION + re-retrieve (×max_data_retries)
+               │                                   │
+               │                      still blank / rewrite rejected
+               │                                   ▼
+               │                       ESCALATE — no judge, NO score
+              yes                      (status: no_data | out_of_scope)
+               ▼
 ┌─────────────────────────────┐
 │ GENERATE   (worker llm)     │  uses: generate.md + skills + exemplars + tools + data
 │  → answer rev0              │
@@ -72,10 +79,30 @@ What this shows:
 - **Evidence first, deterministically.** The model never *picks* a tool — the engine runs the pack's
   read-only tools (or the single SQL call) up front and hands the result in as `data`. (Injection-safe:
   tool output can't trigger another tool call.)
+- **Groundedness is decided BEFORE the judge, and deterministically.** If retrieval came back blank the
+  loop rephrases the question and tries once more; if it is still blank — or the rewrite stopped asking
+  the user's question — the run **escalates and the judge never runs**. This matters because an honest
+  *"there's no data for that"* answer is perfectly consistent with no-data evidence, so a rubric would
+  happily score it as a **pass**. See [`retries-explained.md`](retries-explained.md).
 - **`generate` → `evaluate` → `refine`** is the loop from [`the-refine-loop.md`](the-refine-loop.md).
   `skills` shape both the first draft **and** every rewrite; `exemplars` seed only the first draft;
   the `rubric` grades; the judge's critique becomes refine's `feedback`.
 - **It always returns the *best* answer seen**, with its score — not necessarily the last one.
+
+### Three outcomes of a run
+
+Every run ends in exactly one of these. The first is the only one that carries a score:
+
+| `status` | What it means for a human | Score | Set when |
+|---|---|---|---|
+| `ok` | Answered from retrieved data | `0..max_score` | retrieval produced usable data |
+| `no_data` | The query ran and matched **nothing** — check the identifier, the filters, or freshness | **`None`** | still blank after `max_data_retries`, or the rewrite dropped a pinned identifier |
+| `out_of_scope` | This data **cannot** answer that question — point the user at a different agent | **`None`** | the rewrite refused (`NO_REFORMULATION`) or substituted the subject |
+
+The honest "here's why I couldn't answer" text is still returned in both escalations — what changes is
+that there is **no score**, so no caller can mistake it for a good answer. `grounded` (bool) and
+`data_retries` (int) are returned alongside for observability; `run_local.py` prints the reason instead
+of a score, and `/invoke` returns `score: null`.
 
 ---
 
@@ -127,6 +154,7 @@ never trained parameters (see [`evals-and-the-learning-flywheel.md`](evals-and-t
 | `prompts/generate.md` | the GENERATE step (always pack-owned) | ✅ | — |
 | `prompts/rubric.md` | the EVALUATE (judge) step | ✅ every question | — |
 | `prompts/refine.md` | the REFINE step | ✅ when below `pass_score` | — |
+| `shared/prompts/reformulate.md` | rephrase the QUESTION after a blank retrieval | ✅ only when retrieval is blank | — |
 | `exemplars/*.yaml` | few-shot examples in generate | ✅ | — |
 | `tools:` / SQL | gather evidence before generate | ✅ | — |
 | tracer + memory | per-run events and one logged row | ✅ (side effects) | — |

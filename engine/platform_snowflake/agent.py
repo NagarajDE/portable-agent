@@ -58,7 +58,11 @@ class AskRequest(BaseModel):
 
 class AskResponse(BaseModel):
     answer: str
-    score: int
+    score: int | None    # None unless status == "ok" (an unscored run must never read as a "pass")
+    status: str = "ok"   # "ok" | "no_data" (query ran, nothing there) | "out_of_scope" (this data
+                         #   cannot answer that question) -- the latter two are escalated to a human
+    grounded: bool = True # False when the answer is NOT backed by retrieved data (present for action)
+    data_retries: int = 0 # reformulate-and-retry attempts spent (0 = answered on the first retrieval)
     run_id: str          # correlate this answer to its event-table / query-history / memory rows
 
 
@@ -99,7 +103,13 @@ def manifest():
 def invoke(req: AskRequest, background_tasks: BackgroundTasks) -> AskResponse:
     final = traced_invoke(_graph, initial_state(req.question, req.instructions or ""), USE_CASE)
     background_tasks.add_task(remember_run, final, USE_CASE)   # capture OFF the response path
-    return AskResponse(answer=final["best_answer"], score=final["best_score"],
+    status = final.get("status") or "ok"      # "" -> ok; else the escalation REASON, passed through
+    # An escalated run is not scored -> score=None so a client can't read a "pass". Any non-"ok" status
+    # must land here, so this compares against "ok" rather than enumerating the reasons.
+    return AskResponse(answer=final["best_answer"],
+                       score=None if status != "ok" else final["best_score"],
+                       status=status, grounded=final.get("grounded", True),
+                       data_retries=final.get("data_retries", 0),
                        run_id=final["run_id"])
 
 

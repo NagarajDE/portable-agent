@@ -3,3 +3,6 @@
 inherits: [shared]
 name: "iCertis procurement analytics (active contracts)"
 sample_task: "Who are the top vendors by total active SOW contract value?"
+# A lone all-zero/NULL row is a filter that matched nothing (a supplier/status that isn't there), never
+# a real contract figure -- escalate it as no_data rather than scoring an "it's NULL" answer.
+zero_is_no_data: true

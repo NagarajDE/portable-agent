@@ -95,6 +95,24 @@ grinding every question to `max_iters`.
 rounds before giving up. `max_stall` (default 2) = stop early if that many refines in a row don't
 beat the best score (guards a stuck deterministic loop). Whichever triggers first ends the loop.
 
+**Grounded** — whether the answer is backed by data that was actually retrieved. Decided
+**deterministically at the tool boundary** (a blank retrieval is marked with a sentinel), never inferred
+from the score — because an honest *"there's no data for that"* answer is perfectly consistent with
+no-data evidence, so a judge would score it as a **pass**.
+
+**Escalation (no_data vs. out_of_scope)** — the two ways a run can end **without a score**, handed to a
+human instead. `no_data` = the query ran and matched **nothing** (check the identifier, filters, or
+freshness). `out_of_scope` = this data **cannot** answer that question (point the user at a different
+agent). Both still return the honest explanation; neither returns a score (`score: null`).
+*Example:* asking an inventory agent for employee salaries → `out_of_scope`; asking it for plant `ZZ999`
+which doesn't exist → `no_data`.
+
+**Reformulate + retry** — on a blank retrieval, rephrase the **question** (not the answer) and query
+again, up to `max_data_retries`. The rewrite must still ask the user's question: if it refuses, swaps the
+subject, or drops a pinned identifier like `ZZ999`, it is discarded and the run escalates. Distinct from
+*refine* (fixes the answer) and *re-review* (fixes an unparseable score) — see
+[retries-explained.md](docs/concepts/retries-explained.md).
+
 **Refine-from-best** — each refine round improves the *best-scoring* answer so far (with the critique
 that produced it), not the latest revision — so a rewrite that scored worse never becomes the base.
 Greedy hill-climbing; you always get back the best answer seen.

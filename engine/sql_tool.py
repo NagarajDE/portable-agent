@@ -16,12 +16,60 @@ class SQLTool(Protocol):
     def ask(self, question: str) -> str: ...      # returns rows as text
 
 
+# A retrieval that came back with NO usable rows is marked with this sentinel rather than flattened
+# into benign-looking prose ("No rows." / a clarification), so the loop can tell "answered from data"
+# from "no data" DETERMINISTICALLY -- the SCORE must never be what encodes groundedness (a probabilistic
+# judge can't be trusted to notice). is_no_data()/data_hint() read it back; the hint carries any tool
+# clarification, which the loop uses to reformulate the question and re-query (see engine/graph.py).
+NO_DATA = "__PA_NO_DATA__"
+
+
+def no_data(hint: str = "") -> str:
+    """Mark a blank retrieval, optionally carrying a human/reformulation hint (why nothing came back)."""
+    hint = (hint or "").strip()
+    return NO_DATA if not hint else f"{NO_DATA}\n{hint}"
+
+
+def is_no_data(data) -> bool:
+    return isinstance(data, str) and data.startswith(NO_DATA)
+
+
+def data_hint(data) -> str:
+    """The clarification text a no-data sentinel carries ('' if none / not a sentinel)."""
+    return data[len(NO_DATA):].strip() if is_no_data(data) else ""
+
+
+def looks_all_zero(data) -> bool:
+    """True when a result is ONE data row whose every cell is 0 / NULL / blank -- structurally a row
+    (so is_no_data() is False) yet carrying no information: COUNT(*)=0, SUM(...)=NULL, typically a
+    filter or status label that matched nothing. Deliberately narrow: header + EXACTLY one row.
+
+    This is INDISTINGUISHABLE from a genuine zero ("we really do have 0 active contracts"), so the
+    loop only honors it when a pack opts in with `zero_is_no_data: true` -- see engine/graph.py."""
+    if not isinstance(data, str) or is_no_data(data):
+        return False
+    lines = [ln for ln in data.strip().splitlines() if ln.strip()]
+    if len(lines) != 2:                              # header + one data row, nothing else
+        return False
+
+    def empty(cell: str) -> bool:
+        c = cell.strip().strip("$%").replace(",", "").lower()
+        if c in ("", "none", "null", "nan", "-"):
+            return True
+        try:
+            return float(c) == 0.0                   # 0, 0.0, -0, 0e0 ...
+        except ValueError:
+            return False                             # any real label/value -> informative
+
+    return all(empty(c) for c in lines[1].split("|"))
+
+
 def _rows_to_text(rows) -> str:
     """Format Snowpark result rows into a compact text block for the LLM to read. Truncation is
     the CALLER's concern -- it slices to the cap and appends its own 'omitted' note -- so there is
     no row-count branch here (the caller already limited the query to cap+1)."""
     if not rows:
-        return "No rows."
+        return no_data()                             # zero rows = no usable data (query ran, matched nothing)
     dicts = [r.as_dict() for r in rows]
     cols = list(dicts[0].keys())
     lines = [" | ".join(cols)] + [" | ".join(str(d.get(c)) for c in cols) for d in dicts]
@@ -137,9 +185,9 @@ class CortexAnalystTool:
         # a sql-typed item WITHOUT a statement must not KeyError -- skip it (falls to the text branch)
         sql = next((c.get("statement") for c in content
                     if c.get("type") == "sql" and c.get("statement")), None)
-        if not sql:                                                  # ambiguous Q -> return the text
+        if not sql:                                                  # ambiguous Q / no SQL -> no data
             texts = [c.get("text", "") for c in content if c.get("type") == "text"]
-            return "\n".join(t for t in texts if t) or "Cortex Analyst returned no SQL."
+            return no_data("\n".join(t for t in texts if t) or "Cortex Analyst returned no SQL.")
         sql = _ensure_read_only(sql)                                 # backstop: SELECT-only, single statement
         max_rows = max(1, int(os.getenv("SQL_MAX_ROWS", "100")))     # how many result rows the LLM sees
         timeout = max(1, int(os.getenv("SQL_TIMEOUT_SECONDS", "30")))  # >=1: timeout=0 must not remove the bound

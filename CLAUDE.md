@@ -382,6 +382,38 @@ in sync with `git status`.
 - **No-progress stop:** `max_stall` (default 2) ends the loop after that many refines that don't
   beat `best_score` — guards the deterministic refine-from-best case (same base+critique → same
   answer → grind to `max_iters`). `0` disables it.
+- **Groundedness is DETERMINISTIC, never the judge's job.** A blank retrieval (no rows / no SQL) is
+  marked with the `NO_DATA` sentinel at the tool boundary (`engine/sql_tool.py`: `no_data`/`is_no_data`/
+  `data_hint`), NOT flattened into prose — because an honest "no data" answer is fully consistent with
+  no-data evidence, so the rubric would score it as a *pass* (the exact bug). A blank isn't proof the
+  data is missing (could be a misread question), so the SQL path reformulates the question and re-queries
+  up to `max_data_retries` (default 1, ≤5; `shared/prompts/reformulate.md`). If it stays blank, `generate`
+  sets `grounded=False` plus an escalation REASON in `status` and `after_generate` routes STRAIGHT to END — the judge NEVER
+  runs, `best_score` stays -1, and the surfaces report score N/A + status so it reaches a human as "needs
+  action", never a score. Don't route a no-data run through `evaluate`, and don't "fix" this in the rubric.
+- **A reformulation must ask the USER's question.** "Rows came back" is NOT "the question was answered":
+  asked to rewrite an unanswerable question, a model will happily ask one the semantic model *can*
+  answer, get rows, and flip `grounded` to True — which earned a PASSING 16/18 for an honest "employee
+  data isn't here" answer in live testing. So the rewrite is gated twice: the prompt may REFUSE with
+  `NO_REFORMULATION` (subject not in this data), and the engine checks DETERMINISTICALLY that a
+  distinctive word survived (`_keeps_subject`) and that no pinned identifier — `ZZ999`, `PO12345` — was
+  dropped (`_keeps_pinned`). A refusal or a drift keeps the blank and escalates — it does NOT burn the
+  remaining retry budget. **The two checks are separate because they mean different things to a human:**
+  a SUBSTITUTED subject → `status="out_of_scope"` (this data can't answer that question; ask a different
+  agent), a DROPPED identifier or a still-blank re-query → `status="no_data"` (the query ran and matched
+  nothing; check the code/filters/freshness). Both are unscored (`score=None`). Retrying covers the paths
+  that fire EXACTLY ONCE (single SQL call, deterministic tool sweep); `tool_mode: agentic` is excluded
+  because it already self-corrects across `max_tool_steps`. The subject check folds plurals and uses a
+  ≥3-letter floor, so short nouns (`tax`, `fee`) are visible and `salary`↔`salaries` isn't false drift.
+  Known gaps, all in the SAFE (escalate, never false-pass) direction: a measure swap that keeps its
+  dimension (`tax by region`→`fees by region`) still reads as kept — the `NO_REFORMULATION` refusal is
+  the net; a re-expressed period code (`FY26`→`fiscal 2026`) reads as a dropped identifier and escalates
+  as `no_data` rather than recovering (exempting period codes would let the period be dropped entirely,
+  reintroducing the widening false-pass); and the agentic path does not yet mark a blank gather (a MOCK
+  worker can't drive the ReAct protocol, so marking it would break every creds-free agentic run).
+- **`zero_is_no_data` is OPT-IN (default false).** A single all-zero/NULL row (`COUNT(*)=0`, `SUM=NULL`)
+  is structurally a row, so the sentinel can't see it. Escalating it is only correct where 0 always means
+  "a filter or status label matched nothing" — for a pack where 0 is a real answer, escalating is wrong.
 - **Scoring knobs are separate:** `max_score` (validation cap, default 18) vs `pass_score`
   (stop threshold, must be ≥1; `threshold` is the backward-compatible alias, **default 15** in
   `shared/config.yaml`). Keep it BELOW `max_score`: `pass_score == max_score` means only a perfect

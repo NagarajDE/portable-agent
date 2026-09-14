@@ -147,8 +147,13 @@ def test_load_tools_malformed_value_raises():
             load_tools("uc", {"tools": bad})
 
 
-def test_gather_context_with_no_tools_is_safe():
-    assert gather_context("q", [], "rid") == "No tool observations."
+def test_gather_context_with_no_tools_is_a_blank_retrieval():
+    # NOT ONE tool produced evidence -> the NO_DATA sentinel, so the loop escalates instead of scoring
+    # an answer written from nothing. The human-readable note rides along as the hint.
+    from engine.sql_tool import is_no_data, data_hint
+    out = gather_context("q", [], "rid")
+    assert is_no_data(out)
+    assert data_hint(out) == "No tool observations."
 
 
 def test_load_tools_builds_and_gather_runs_multiple(monkeypatch):

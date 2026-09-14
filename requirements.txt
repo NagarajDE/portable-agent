@@ -14,6 +14,11 @@ snowflake-snowpark-python    # WORKER_PROVIDER=cortex  / SQL_TOOL=cortex  (Corte
 openai                       # WORKER_PROVIDER=databricks (OpenAI-compatible endpoint; or use litellm)
 databricks-sdk               # SQL_TOOL=genie
 
+# --- OPTIONAL agentic MCP tools: install ONLY if a pack declares a `type: mcp` tool ---
+# Lazy-imported in engine/tools/mcp_tool.py (exposes an MCP stdio server's tool as a Tool). Without
+# it, non-MCP packs are unaffected; an MCP tool would construct fine but fail at first call.
+mcp
+
 # --- OPTIONAL local dev: auto-load a .env file so you don't export vars by hand ---
 python-dotenv
 
