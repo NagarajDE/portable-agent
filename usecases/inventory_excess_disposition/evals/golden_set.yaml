@@ -1,0 +1,8 @@
+# Portable eval questions for the excess-disposition pack. These run end-to-end with a real (or
+# scripted) planner + the live view (or the mock fixtures). Under the bare MOCK provider the model
+# can't emit a plan, so the pack escalates -- the offline proof is in tests/test_planned.py via the
+# scripted planner; the LIVE proof is `SQL_TOOL=cortex WORKER_PROVIDER=cortex python run_local.py ...`.
+- question: "For our top excess inventory by value, which positions should we Hold, Reduce inbound, Redistribute, or send to Disposition — and why?"
+  expect: "Ranks top excess by value, uses forward demand for those materials, and buckets each with the reason."
+- question: "Which excess materials have no forward demand and should go to a disposition review?"
+  expect: "Names the high-excess materials whose forward demand is zero."

@@ -1,0 +1,25 @@
+inherits: [shared]
+name: "Inventory excess disposition (multi-step planned)"
+description: "A PLANNED multi-step agent over INVENTORY_ANALYTICS: it ranks excess inventory by value,
+  pulls forward demand for those specific materials, then classifies each position into Hold /
+  Reduce-inbound / Redistribute / Disposition with the reason. The chain (rank -> demand-for-those ->
+  classify) is exactly what a single query can't produce. Runs on mock fixtures with no creds; point
+  SQL_TOOL=cortex at the view to run it live."
+sample_task: "For our top excess inventory by value, which positions should we Hold, Reduce inbound, Redistribute, or send to Disposition — and why?"
+sample_questions:
+  - "For our top excess inventory by value, which positions should we Hold, Reduce inbound, Redistribute, or send to Disposition — and why?"
+  - "Which excess materials have no forward demand and should go to a disposition review?"
+
+# PLANNED multi-step: the model commits a validated DAG (rank excess -> forward demand for those
+# materials -> classify), the engine executes it chaining {{sN}} results, replanning on failure. The
+# `sql` tool (Cortex Analyst on the pack's semantic view; mock fixtures offline) is the only step tool.
+tool_mode: planned
+max_plan_steps: 6
+max_replans: 2
+tools:
+  - type: sql
+# The PLANNER sees only the decomposition guidance (keeps the plan prompt lean and on-shape); the
+# answer-side skills reach synthesis via the full skill set.
+plan_skills: [disposition_plan.md]
+# A lone all-zero/NULL row means a filter matched nothing, never a real excess figure -> escalate it.
+zero_is_no_data: true

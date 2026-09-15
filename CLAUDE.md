@@ -96,6 +96,8 @@ checklist: `docs/concepts/use-case-pack-anatomy.md`.
 | `parity_hana_snowflake` | cross-engine parity | overrides the shared rubric (demonstrates override, not inherit) |
 | `api_assistant` | generic **non-SQL** example | demonstrates the tool layer: a mock catalog + the generic http tool (mock mode); no creds, no network |
 | `incident_triage` | **agentic** tools example | `tool_mode: agentic` — the MODEL chooses which read-only tools to call (catalog · http health · deploys), then triages; mock/no-creds (point at a real model to see tools fire) |
+| `ops_rca` | **planned** multi-step, NON-SQL | `tool_mode: planned` — a validated DAG of read-only mock tools (detect → health → deploys), chained; creds-free (needs a real/scripted planner; bare mock escalates) |
+| `inventory_excess_disposition` | **planned** multi-step, SQL/BI | `tool_mode: planned` over `INVENTORY_ANALYTICS` — rank excess → forward demand for THOSE materials (`{{s1}}`) → classify Hold/Reduce/Redistribute/Disposition; the chain a single query can't produce |
 
 ## Hard-won decisions from design discussion (don't re-derive these)
 
@@ -477,3 +479,19 @@ in sync with `git status`.
   `dispatch()`, writes never auto-run. It weakens the deterministic path's injection-safety (documented
   trade-off). `type: mcp` (`engine/tools/mcp_tool.py`) exposes an MCP-server tool as a `Tool`,
   `read_only` fail-closed; live call lazy + untested. See `docs/concepts/tools-and-agents.md` §9.
+- **Planned multi-step (opt-in):** `tool_mode: planned` (`engine/tools/planned.py`, prompts
+  `shared/prompts/plan.md` + `replan.md`) is for a KNOWN, repeatable multi-step shape where step N's
+  result shapes step N+1. The model commits a JSON **DAG**; `parse_plan` validates it DETERMINISTICALLY
+  **before anything runs** (allowlist of the pack's tool labels · unique ids `^s[1-9][0-9]*$` · deps ⊆
+  ids · every `{{sN}}` declared as a dep · acyclic · ≤ `max_plan_steps`); the engine executes it,
+  substituting a BOUNDED (≤600-char, single-line, sanitized, single-pass) summary for each `{{sN}}`, and
+  REPLANS on a step failure (≤ `max_replans`; **successful results are frozen/immutable**). Invariants
+  (don't regress): every step goes through `dispatch()` with `approved=False` (**writes refused**); a
+  step whose output `is_no_data()` or is blank is `empty`, **NOT evidence**; zero evidence → the
+  `NO_DATA` sentinel → the existing escalation (judge never scores an empty answer); `planned` is
+  EXCLUDED from `_frame_question` and the reformulate loop (the planner owns query formulation, replan
+  is its self-correction). The planner sees `plan_skills` (else `frame_skills`, else full skills). It is
+  stronger than agentic (deterministic validation + declared refs + allowlist) but weaker than pure
+  deterministic (a result parameterizes a later, still-read-only, query). Per-step tracing
+  (`plan_created`/`plan_step`/`replan`) via `trace_event` in `engine/tracing.py`. Full guide +
+  MODE-SELECTION test: `docs/concepts/multi-step-planning.md`.

@@ -133,3 +133,31 @@ def describe_tools(loaded: list[LoadedTool]) -> str:
         cap = "read-only" if lt.tool.spec.read_only else "SIDE-EFFECTING (requires approval)"
         lines.append(f"- {lt.label} ({cap}): {lt.tool.spec.description}")
     return "\n".join(lines)
+
+
+def _type_name(annotation) -> str:
+    return getattr(annotation, "__name__", None) or str(annotation).replace("typing.", "")
+
+
+def describe_tools_schema(loaded: list[LoadedTool]) -> str:
+    """Like describe_tools but ALSO lists each tool's INPUT fields (from its pydantic input_model),
+    so a PLANNER can form valid step inputs. A tool with no input_model accepts a free-form object.
+    Used ONLY by the plan prompt (engine/tools/planned.py) -- no config, no new tool concept."""
+    if not loaded:
+        return "None."
+    lines = []
+    for lt in loaded:
+        spec = lt.tool.spec
+        im = spec.input_model
+        if im is not None:
+            try:
+                fields = ", ".join(f"{n}: {_type_name(f.annotation)}"
+                                   for n, f in im.model_fields.items())
+            except Exception:
+                fields = ""
+            schema = "{" + fields + "}" if fields else "{}"
+        else:
+            schema = "{ free-form object }"
+        cap = "read-only" if spec.read_only else "WRITE (requires approval; NOT auto-run)"
+        lines.append(f"- {lt.label} [{cap}] input {schema}: {spec.description}")
+    return "\n".join(lines)

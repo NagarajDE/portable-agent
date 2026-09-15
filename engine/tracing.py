@@ -235,6 +235,20 @@ def end_tracer(run_id: str) -> None:
         t.close()
 
 
+def trace_event(run_id: str, use_case: str, name: str, **fields) -> None:
+    """Emit ONE structured event from INSIDE a node -- e.g. `run_planned`'s per-step / replan spans,
+    which happen within the `generate` node rather than at a node boundary `instrument` can wrap.
+    Same guarantees as the rest of this module: no-op when TRACER=none, and FAIL-SAFE (a tracer error
+    is swallowed -- observability must never break a run). Events carry the run's `run_id`, so they
+    join the loop's `generate/evaluate/refine` events for the same run."""
+    if not tracing_enabled():
+        return
+    try:
+        get_tracer(run_id, use_case).event(name, **fields)
+    except Exception:
+        pass
+
+
 # ==========================================================================
 # INSTRUMENTATION -- how the loop is observed WITHOUT touching the loop.
 # graph.py imports only `instrument`; call sites import `traced_invoke`.

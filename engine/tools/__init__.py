@@ -26,8 +26,11 @@ from engine.tools.registry import register, build_tool, known_tools, UnknownTool
 from engine.tools.dispatch import (
     dispatch, ToolValidationError, ToolTimeoutError, ApprovalRequiredError,
 )
-from engine.tools.orchestrator import LoadedTool, load_tools, gather_context, describe_tools
+from engine.tools.orchestrator import (
+    LoadedTool, load_tools, gather_context, describe_tools, describe_tools_schema,
+)
 from engine.tools.agentic import run_agentic       # opt-in model-driven gathering (tool_mode: agentic)
+from engine.tools.planned import run_planned        # opt-in validated-DAG multi-step (tool_mode: planned)
 
 # Import the builtin adapters for their registration side-effect, so `known_tools()` is
 # populated on `import engine.tools`. Their heavy/vendor deps stay lazy inside run().
@@ -37,5 +40,6 @@ __all__ = [
     "ToolSpec", "ToolResult", "ToolError", "ToolContext", "Tool", "bound_output", "redact", "strict_bool",
     "register", "build_tool", "known_tools", "UnknownToolError",
     "dispatch", "ToolValidationError", "ToolTimeoutError", "ApprovalRequiredError",
-    "LoadedTool", "load_tools", "gather_context", "describe_tools", "run_agentic",
+    "LoadedTool", "load_tools", "gather_context", "describe_tools", "describe_tools_schema",
+    "run_agentic", "run_planned",
 ]

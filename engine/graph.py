@@ -25,7 +25,7 @@ from engine.sql_tool import (get_sql_tool, SQLTool, is_no_data, data_hint, no_da
                              looks_all_zero)
 from engine.tracing import instrument       # observability is applied from OUTSIDE the nodes
 from engine.tools import (load_tools, gather_context, describe_tools, run_agentic,   # generic tool layer (SQL = one tool)
-                          strict_bool)
+                          run_planned, strict_bool)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 USECASES = REPO_ROOT / "usecases"
@@ -489,8 +489,11 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     max_stall = cfg.get("max_stall", 2)                # stop after this many refines that DON'T beat
                                                        # best (0 = off). Guards the deterministic
                                                        # refine-from-best "grind to max_iters" case.
-    tool_mode = str(cfg.get("tool_mode", "deterministic")).strip().lower()   # deterministic | agentic
+    tool_mode = str(cfg.get("tool_mode", "deterministic")).strip().lower()   # deterministic|agentic|planned
     max_tool_steps = cfg.get("max_tool_steps", 4)      # agentic: max model-chosen tool calls per run
+    max_plan_steps = cfg.get("max_plan_steps", 8)      # planned: max steps in the validated DAG (dispatches)
+    max_replans = cfg.get("max_replans", 2)            # planned: max plan revisions on a step failure
+    max_ref_chars = cfg.get("max_ref_chars", 2000)     # planned: cap on a {{sN}} step-to-step handoff summary
     max_data_retries = cfg.get("max_data_retries", 1)  # blank retrieval -> reformulate+re-query this many
                                                        # times before escalating as no_data (0 = at once)
     # OPT-IN: treat a single all-zero/NULL row (COUNT(*)=0, SUM(...)=NULL) as a blank retrieval. Default
@@ -511,15 +514,23 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     for _name, _val, _min in (("max_score", max_score, 1), ("pass_score", pass_score, 1),
                               ("max_iters", max_iters, 0), ("eval_retries", eval_retries, 0),
                               ("max_stall", max_stall, 0), ("max_tool_steps", max_tool_steps, 0),
-                              ("max_data_retries", max_data_retries, 0)):
+                              ("max_data_retries", max_data_retries, 0),
+                              ("max_plan_steps", max_plan_steps, 1), ("max_replans", max_replans, 0),
+                              ("max_ref_chars", max_ref_chars, 200)):
         if type(_val) is not int or _val < _min:       # `type is not int` also rejects bools
             raise ValueError(f"{_name} must be an integer >= {_min}")   # pass_score>=1: 0 would let a fallback-0 "pass"
-    if tool_mode not in ("deterministic", "agentic"):
-        raise ValueError("tool_mode must be 'deterministic' or 'agentic'")
+    if tool_mode not in ("deterministic", "agentic", "planned"):
+        raise ValueError("tool_mode must be 'deterministic', 'agentic', or 'planned'")
     if max_tool_steps > 10:                             # bound cost/latency of the gathering loop
         raise ValueError("max_tool_steps must be <= 10")
     if max_data_retries > 5:                            # bound cost/latency of the reformulate-retry loop
         raise ValueError("max_data_retries must be <= 5")
+    if max_plan_steps > 20:                             # bound cost/latency (DoS) of a multi-step plan
+        raise ValueError("max_plan_steps must be <= 20")
+    if max_replans > 5:                                 # bound plan-revision churn
+        raise ValueError("max_replans must be <= 5")
+    if max_ref_chars > 8000:                            # keep an untrusted handoff summary bounded
+        raise ValueError("max_ref_chars must be <= 8000")
     if pass_score > max_score:
         raise ValueError("pass_score must be <= max_score")
     if max_iters > 10:                                 # keep graph steps under LangGraph's default recursion limit (25)
@@ -548,16 +559,23 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         semantic = semantic_layer or load_semantic_layer(use_case)
         sql = get_sql_tool(use_case, cfg.get("default_sql_tool", "mock"), semantic)
     tools_desc = describe_tools(loaded_tools or [])    # {tools} block for the persona ("None." if legacy/none)
-    if tool_mode == "agentic" and loaded_tools is None:
-        raise ValueError("tool_mode: agentic requires a `tools:` list; omit tool_mode for the SQL path")
+    if tool_mode in ("agentic", "planned") and loaded_tools is None:
+        raise ValueError(f"tool_mode: {tool_mode} requires a `tools:` list; omit tool_mode for the SQL path")
     # Load the act-selection prompt once, only for an agentic tools pack (else the file need not exist).
     act_template = _prompt(use_case, "act.md") if (tool_mode == "agentic" and loaded_tools) else ""
+    # Load the plan/replan prompts once, only for a planned tools pack (else the files need not exist).
+    plan_template = _prompt(use_case, "plan.md") if (tool_mode == "planned" and loaded_tools) else ""
+    replan_template = _prompt(use_case, "replan.md") if (tool_mode == "planned" and loaded_tools) else ""
     skills = load_skills(use_case, cfg.get("exclude_shared_skills"))
     # FRAMING subset: the query-formulation step sees only the skills a pack lists in `frame_skills:`
     # (the value->column maps), so porting many answer-side skills doesn't bloat the framing prompt or
     # tempt it to over-reach. Unset -> the FULL skill set (backward compatible: goa_spend unchanged).
     frame_skills_text = (load_named_skills(use_case, cfg.get("frame_skills"))
                          if cfg.get("frame_skills") else skills)
+    # PLANNING subset (planned mode): the planner sees only `plan_skills:` (the decomposition guidance),
+    # keeping the plan prompt lean; unset -> `frame_skills` if set, else the FULL skill set.
+    plan_skills_text = (load_named_skills(use_case, cfg.get("plan_skills"))
+                        if cfg.get("plan_skills") else frame_skills_text)
     exemplars = load_exemplars(use_case)
     # OPERATOR INSTRUCTIONS: injected `instructions=` (DI/runner override) wins, else the pack+shared
     # instruction files. Per-REQUEST instructions (state) are honored ONLY if the pack opts in.
@@ -584,6 +602,13 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
             out = sql.ask(question)
         elif tool_mode == "agentic":
             out = run_agentic(question, loaded_tools, llm, act_template, run_id, max_tool_steps)
+        elif tool_mode == "planned":
+            # Multi-step: the model commits a VALIDATED DAG; the engine executes it (chaining {{sN}}
+            # results), replanning on failure. Self-corrects via replan -> excluded from the outer
+            # reformulate loop and from _frame_question (the planner owns query formulation).
+            out = run_planned(question, loaded_tools, llm, plan_template, replan_template,
+                              plan_skills_text, run_id, use_case, max_plan_steps, max_replans,
+                              max_ref_chars)
         elif not loaded_tools:
             # `tools: []` is a DELIBERATELY toolless agent (answers from skills alone). It has no
             # retrieval, so there is no such thing as a blank one -- never escalate it. Distinct wording

@@ -1,0 +1,7 @@
+# Portable eval questions for ops_rca. These run end-to-end only with a real (or scripted) planner;
+# under the bare MOCK provider the pack escalates (the mock can't emit a plan), so they are exercised
+# in tests via the scripted planner double (tests/test_planned.py), not the mock golden sweep.
+- question: "Which service is failing, and did a recent deploy likely cause it?"
+  expect: "Identifies orders-api as degraded and names the v2.4.1 deploy 12m ago as the leading suspect."
+- question: "Is orders-api's failure linked to a recent deploy, and who owns it?"
+  expect: "Correlates the degraded status with the recent v2.4.1 deploy."

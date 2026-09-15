@@ -1,0 +1,42 @@
+inherits: [shared]
+name: "Ops incident RCA (multi-step planned example)"
+description: "A multi-step, NON-SQL agent: it PLANS a sequence of read-only probes (detect the failing
+  service, pull its health, correlate recent deploys), chaining each step's result into the next, then
+  attributes a likely root cause. Creds-free (mock tools). Like agentic packs, it needs a real (or
+  scripted) model to emit the plan — under the bare MOCK provider it escalates instead of guessing."
+sample_task: "Which service is failing, and did a recent deploy likely cause it?"
+sample_questions:
+  - "Which service is failing, and did a recent deploy likely cause it?"
+  - "Is orders-api's failure linked to a recent deploy, and who owns it?"
+
+# Non-SQL agent -> drop the SQL-only shared skill so SELECT-only rules aren't injected.
+exclude_shared_skills: [sql_safety]
+
+# PLANNED multi-step (the distinguishing feature): the model commits a validated DAG up front; the
+# engine executes it, chaining {{sN}} results, replanning on failure. Every step runs read-only via
+# dispatch(). Contrast: api_assistant (deterministic sweep) and incident_triage (agentic ReAct).
+tool_mode: planned
+max_plan_steps: 6
+max_replans: 2
+tools:
+  - type: mock
+    name: detect
+    params:
+      description: "Detect which service is currently failing. Input {\"query\": \"<text>\"}."
+      output: |
+        SERVICE     | STATUS    | OPEN_INCIDENTS
+        orders-api  | degraded  | 1
+  - type: mock
+    name: health
+    params:
+      description: "Health detail for one service. Input {\"query\": \"<service>\"}."
+      output: |
+        service=orders-api status=degraded error_rate=6.2% latency_p95=1400ms since=12m
+  - type: mock
+    name: deploys
+    params:
+      description: "Recent deploys for one service, newest first. Input {\"query\": \"<service>\"}."
+      output: |
+        SERVICE     | VERSION | WHEN
+        orders-api  | v2.4.1  | 12m ago
+        orders-api  | v2.4.0  | 3d ago

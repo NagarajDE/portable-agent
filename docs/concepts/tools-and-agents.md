@@ -240,6 +240,28 @@ tools:
     params: { tool: get_issue, command: "npx -y @modelcontextprotocol/server-jira", read_only: true }
 ```
 
+## 10. Planned mode (opt-in) — validated multi-step reasoning
+
+When step N's result shapes step N+1 in a **known, repeatable** way (rank excess → forward demand for
+*those* materials → classify), `tool_mode: planned` fits better than free ReAct: the model commits a
+JSON **DAG** that is validated DETERMINISTICALLY before anything runs (allowlist · ids · deps · acyclic ·
+`{{sN}}` references declared · budget), the engine executes it (chaining a bounded summary for each
+`{{sN}}`) and **replans on failure** (successful results frozen). Every step still goes through
+`dispatch()` with writes refused; a blank step is not evidence; zero evidence escalates via the normal
+grounding path. It's stronger than agentic (deterministic validation) but weaker than deterministic (a
+result parameterizes a later, still-read-only, query).
+
+```yaml
+tool_mode: planned        # deterministic | agentic | planned
+tools: [ { type: sql } ]  # the plan's allowlist = the declared tool labels
+max_plan_steps: 8         # <= 20 (also the dispatch budget)
+max_replans: 2            # <= 5
+plan_skills: [ ... ]      # OPTIONAL: decomposition guidance the planner sees
+```
+
+Full guide, the **mode-selection decision test**, the security model, and the two example packs
+(`ops_rca`, `inventory_excess_disposition`): [`multi-step-planning.md`](multi-step-planning.md).
+
 ## See also
 - [`engine/tools/`](../../engine/tools/) — `base` · `registry` · `dispatch` · `orchestrator` · `agentic` · adapters (sql/mock/http/mcp).
 - [`usecases/api_assistant/`](../../usecases/api_assistant/) — the generic, non-SQL example pack (deterministic tools).
