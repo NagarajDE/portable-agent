@@ -1,3 +1,5 @@
 inherits: [shared]
 name: "Cross-engine parity – SAP HANA vs Snowflake"
 sample_task: "Do MARA/MARC/MBEW row counts match between SAP HANA and Snowflake?"
+# Skill-informed query framing (opt-in, fail-safe); falls back to the raw question on any drift.
+frame_query: true

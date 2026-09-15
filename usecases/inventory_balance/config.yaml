@@ -5,3 +5,11 @@ sample_task: "What is the total current on-hand inventory balance by location?"
 # balance -- so escalate it as no_data instead of scoring an "it's NULL" answer. Live example: asking for
 # plant ZZ999 returned `TOTAL_STOCK_QUANTITY | TOTAL_INVENTORY_VALUE / None | None`.
 zero_is_no_data: true
+# Skill-informed framing: bind a named product type to the ProductType dimension (and name the measure)
+# before the Analyst call. frame_skills scopes framing to the value->column map; the workflow/interpretation
+# skills stay for answer synthesis.
+frame_query: true
+frame_skills: [dimension_map.md]
+# Reactive value recovery: if a query comes back EMPTY, look up the real ProductType values and re-ask with
+# the exact stored spelling (e.g. "instruments" -> "Instrument") (Cortex only; no-op on mock).
+recover_value_dims: [ "INVENTORY.PRODUCT_TYPE" ]

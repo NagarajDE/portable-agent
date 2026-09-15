@@ -273,6 +273,169 @@ def test_blank_tools_retrieval_retries_then_escalates(monkeypatch):
     assert final["data_retries"] == 1        # the deterministic tools path retries like SQL now
 
 
+# --- skill-informed query framing (frame_query) --------------------------------------------------
+# With frame_query ON the worker gets an EXTRA call FIRST (the rewrite), so replies are ordered
+# [framed_question, answer] and sql.calls[0] is what actually hit the tool.
+def test_framing_rewrites_question_before_retrieval(monkeypatch):
+    monkeypatch.setattr(G, "load_config", lambda uc: {**_CFG, "frame_query": True})
+    w = _Cap("total InvoiceUSD for the IT Software category", "Grounded answer from the rows.")
+    judge = _JudgeSpy("SCORE: 18/18 - ok")
+    sql = _Sql("category | total\nIT Software | 99")
+    final = build_graph("dq_qals", llm=w, eval_llm=judge, sql=sql, verbose=False) \
+        .invoke(initial_state("average invoice for the IT Software category"))
+    assert sql.calls[0] == "total InvoiceUSD for the IT Software category"  # the FRAMED q hit the tool
+    assert len(w.prompts) == 2                              # one framing call + one generate call
+    assert final["grounded"] is True and final["best_score"] == 18
+
+
+def test_framing_discards_drift_uses_raw(monkeypatch):
+    # A rewrite that SUBSTITUTES the subject must be discarded (same drift guards as the retry) and the
+    # RAW question sent instead -- framing can only add precision, never change what is asked.
+    monkeypatch.setattr(G, "load_config", lambda uc: {**_CFG, "frame_query": True})
+    w = _Cap("total employee headcount by department", "Grounded answer.")
+    judge = _JudgeSpy("SCORE: 18/18 - ok")
+    sql = _Sql("supplier | total\nIBM | 5")
+    final = build_graph("dq_qals", llm=w, eval_llm=judge, sql=sql, verbose=False) \
+        .invoke(initial_state("total contract value by supplier"))
+    assert sql.calls[0] == "total contract value by supplier"   # drift discarded -> raw question used
+
+
+def test_framing_empty_reply_falls_back_to_raw(monkeypatch):
+    # An empty framing reply is fail-safe: use the raw question (never escalate just because framing
+    # produced nothing).
+    monkeypatch.setattr(G, "load_config", lambda uc: {**_CFG, "frame_query": True})
+    w = _Cap("", "Grounded answer.")
+    judge = _JudgeSpy("SCORE: 18/18 - ok")
+    sql = _Sql("region | total\nEMEA | 42")
+    final = build_graph("dq_qals", llm=w, eval_llm=judge, sql=sql, verbose=False) \
+        .invoke(initial_state("average invoice for the IT Software category"))
+    assert sql.calls[0] == "average invoice for the IT Software category"   # raw used, not the empty q
+
+
+def test_framing_off_sends_raw_question(monkeypatch):
+    # frame_query defaults OFF -> no framing call, raw question sent -> byte-identical to legacy behavior.
+    monkeypatch.setattr(G, "load_config", lambda uc: {**_CFG})
+    w = _Cap("Grounded answer from the rows.")               # ONLY the generate call, no framing call
+    judge = _JudgeSpy("SCORE: 18/18 - ok")
+    sql = _Sql("region | total\nEMEA | 42")
+    final = build_graph("dq_qals", llm=w, eval_llm=judge, sql=sql, verbose=False) \
+        .invoke(initial_state("average invoice for the IT Software category"))
+    assert sql.calls[0] == "average invoice for the IT Software category"   # raw, unframed
+    assert len(w.prompts) == 1                               # no extra framing call happened
+
+
+# --- frame_skills: framing sees a focused SUBSET; the answer step still sees ALL skills --------------
+def test_load_named_skills_basics():
+    full = G.load_skills("dq_qals")
+    one = G.load_named_skills("dq_qals", ["duplicate_detection"])
+    assert one != "None." and one != full and len(one) < len(full)   # a real, strict subset
+    assert G.load_named_skills("dq_qals", ["duplicate_detection.md"]) == one   # .md optional
+    assert G.load_named_skills("dq_qals", []) == "None."             # empty -> nothing
+    assert G.load_named_skills("dq_qals", ["nope_missing"]) == "None."  # unknown -> nothing
+
+
+def test_frame_skills_subsets_framing_prompt_only(monkeypatch):
+    # framing prompt carries ONLY the listed skill; the generate prompt carries the FULL skill set.
+    monkeypatch.setattr(G, "load_config",
+                        lambda uc: {**_CFG, "frame_query": True, "frame_skills": ["duplicate_detection"]})
+    sub = G.load_named_skills("dq_qals", ["duplicate_detection"])
+    full = G.load_skills("dq_qals")
+    w = _Cap("framed question", "Grounded answer.")          # [0]=framing call, [1]=generate call
+    sql = _Sql("status | n\nOPEN | 3")
+    build_graph("dq_qals", llm=w, eval_llm=_JudgeSpy("SCORE: 18/18 - ok"), sql=sql, verbose=False) \
+        .invoke(initial_state("how many duplicate lots by status"))
+    assert sub in w.prompts[0] and full not in w.prompts[0]  # framing got the subset, NOT the full set
+    assert full in w.prompts[1]                              # generate still got the full skill set
+
+
+def test_framing_runs_before_the_agentic_loop(monkeypatch):
+    # frame_query now applies to the AGENTIC path too: the question is framed ONCE before the ReAct loop
+    # (was previously skipped for tool_mode: agentic).
+    cfg = {**_CFG, "frame_query": True, "tool_mode": "agentic", "max_tool_steps": 1,
+           "tools": [{"type": "mock", "name": "probe",
+                      "params": {"description": "probe", "output": "SVC | STATUS\norders | ok"}}]}
+    monkeypatch.setattr(G, "load_config", lambda uc: cfg)
+    w = _Cap("framed question", "final answer")              # [0] MUST be the framing call
+    build_graph("incident_triage", llm=w, eval_llm=_JudgeSpy("SCORE: 18/18 - ok"), verbose=False) \
+        .invoke(initial_state("why is orders-api failing"))
+    assert "remove column ambiguity" in w.prompts[0]         # framing ran FIRST, before the agentic loop
+
+
+# --- recover_value_dims: on an EMPTY result, look up real values and re-ask with the exact spelling -------
+class _SqlDisc(_Sql):
+    """SQL double that ALSO exposes the OPTIONAL value-lookup capability (distinct_values), recording how it
+    was called. A plain _Sql lacks the method -- that is the mock/off-Cortex case (the lookup no-ops)."""
+    def __init__(self, *results, values=None, boom=False):
+        super().__init__(*results)
+        self._values, self._boom, self.discover_calls = (values or {}), boom, []
+
+    def distinct_values(self, dim_paths, limit=50):
+        self.discover_calls.append((list(dim_paths), limit))
+        if self._boom:
+            raise RuntimeError("value lookup blew up")
+        return self._values
+
+
+def test_recovery_looks_up_values_on_empty_and_feeds_reformulate(monkeypatch):
+    # First query comes back EMPTY -> the engine looks up the real values and hands them to the REFORMULATE
+    # step (worker call [0], framing is off), which re-asks with the exact spelling; the retry then recovers.
+    monkeypatch.setattr(G, "load_config", lambda uc: {**_CFG, "max_data_retries": 1,
+                        "recover_value_dims": ["BLV.BUSINESS_STATUS"]})
+    w = _Cap("contracts where BUSINESS_STATUS = 'Executed'", "Grounded answer from the rows.")
+    sql = _SqlDisc(no_data("no rows for status = 'active'"), "status | n\nExecuted | 3",
+                   values={"BLV.BUSINESS_STATUS": ["Executed", "Approved", "Expired"]})
+    final = build_graph("dq_qals", llm=w, eval_llm=_JudgeSpy("SCORE: 18/18 - ok"), sql=sql, verbose=False) \
+        .invoke(initial_state("show me active contracts"))
+    assert "Executed, Approved, Expired" in w.prompts[0]      # real values reached the REFORMULATE prompt
+    assert "Executed, Approved, Expired" not in w.prompts[1]  # NOT the answer prompt
+    assert sql.discover_calls == [(["BLV.BUSINESS_STATUS"], 50)]   # looked up once, default cap
+    assert final["grounded"] is True and final["best_score"] == 18
+
+
+def test_recovery_not_triggered_when_first_query_returns_rows(monkeypatch):
+    # The efficiency win: a question that returns rows on the first try pays NOTHING -- no value lookup.
+    monkeypatch.setattr(G, "load_config", lambda uc: {**_CFG, "recover_value_dims": ["T.STATUS"]})
+    w = _Cap("Grounded answer.")                              # only the generate call
+    sql = _SqlDisc("status | n\nOPEN | 3", values={"T.STATUS": ["OPEN", "CLOSED"]})
+    final = build_graph("dq_qals", llm=w, eval_llm=_JudgeSpy("SCORE: 18/18 - ok"), sql=sql, verbose=False) \
+        .invoke(initial_state("how many open lots"))
+    assert sql.discover_calls == []                           # first query had rows -> no lookup, no waste
+    assert final["grounded"] is True
+
+
+def test_recovery_noop_when_tool_lacks_capability(monkeypatch):
+    # Tool has no distinct_values (MOCK / off-Cortex): the empty-result retry degrades to a plain reword,
+    # no crash, and still recovers.
+    monkeypatch.setattr(G, "load_config", lambda uc: {**_CFG, "max_data_retries": 1,
+                        "recover_value_dims": ["T.STATUS"]})
+    w = _Cap("count of open lots", "Grounded answer.")        # reword keeps the subject
+    sql = _Sql(no_data("nothing"), "status | n\nOPEN | 3")   # plain double: no distinct_values method
+    final = build_graph("dq_qals", llm=w, eval_llm=_JudgeSpy("SCORE: 18/18 - ok"), sql=sql, verbose=False) \
+        .invoke(initial_state("how many open lots"))
+    assert final["grounded"] is True                         # recovered via plain reword, no crash
+
+
+def test_recovery_error_falls_back_to_plain_reword(monkeypatch):
+    # A value lookup that RAISES is swallowed (best-effort): the retry rewords without live values and the
+    # run still recovers -- recovery can never create an escalation or a 500.
+    monkeypatch.setattr(G, "load_config", lambda uc: {**_CFG, "max_data_retries": 1,
+                        "recover_value_dims": ["T.STATUS"]})
+    w = _Cap("count of open lots", "Grounded answer.")
+    sql = _SqlDisc(no_data("nothing"), "status | n\nOPEN | 3", boom=True)   # lookup raises
+    final = build_graph("dq_qals", llm=w, eval_llm=_JudgeSpy("SCORE: 18/18 - ok"), sql=sql, verbose=False) \
+        .invoke(initial_state("how many open lots"))
+    assert len(sql.discover_calls) == 1                      # it was attempted...
+    assert final["grounded"] is True                         # ...error swallowed, reword recovered
+
+
+def test_recover_value_dims_must_be_a_list(monkeypatch):
+    # Misconfiguration is caught at build time: a non-list recover_value_dims is a hard error.
+    import pytest
+    monkeypatch.setattr(G, "load_config", lambda uc: {**_CFG, "recover_value_dims": "T.STATUS"})
+    with pytest.raises(ValueError):
+        build_graph("dq_qals", llm=_Cap("x", "y"), eval_llm=_JudgeSpy(), sql=_Sql("a | b\n1 | 2"), verbose=False)
+
+
 def test_toolless_pack_is_not_treated_as_blank(monkeypatch):
     # `tools: []` is a DELIBERATELY toolless agent (answers from skills alone): it has no retrieval,
     # so there is no blank retrieval to escalate.

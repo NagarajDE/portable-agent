@@ -1,3 +1,5 @@
 inherits: [shared]
 name: "Anomaly root-cause investigation"
 sample_task: "Orders dropped 30% yesterday — why?"
+# Skill-informed query framing (opt-in, fail-safe); falls back to the raw question on any drift.
+frame_query: true

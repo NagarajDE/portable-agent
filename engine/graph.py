@@ -143,6 +143,30 @@ def load_skills(use_case: str, exclude_shared: list | None = None) -> str:
     return "\n\n".join(f.read_text(encoding="utf-8").strip() for f in files) if files else "None."
 
 
+def load_named_skills(use_case: str, names) -> str:
+    """Load ONLY the skill files named in `names` (filename, with or without `.md`), in the order given,
+    pack dir winning over shared on a stem clash. Used for the FRAMING subset (`frame_skills:`) so the
+    query-formulation step sees a focused set (the value->column maps) even when the pack ships many
+    answer-side skills. Unknown names are skipped; an empty/all-unknown list yields 'None.' (framing then
+    has nothing to bind and falls back to the raw question -- safe)."""
+    if isinstance(names, str):
+        names = [names]
+    wanted = []
+    for n in (names or []):
+        s = str(n).strip()
+        if s:
+            wanted.append((s[:-3] if s.lower().endswith(".md") else s).lower())
+    if not wanted:
+        return "None."
+    found = {}
+    for base in (USECASES / use_case / "skills", SHARED / "skills"):   # pack first -> pack wins
+        if base.exists():
+            for f in base.glob("*.md"):
+                found.setdefault(f.stem.lower(), f)
+    files = [found[w] for w in wanted if w in found]
+    return "\n\n".join(f.read_text(encoding="utf-8").strip() for f in files) if files else "None."
+
+
 def load_instructions(use_case: str, exclude: list | None = None) -> str:
     """Operator INSTRUCTIONS -- behavioral/policy directives, composed like skills:
     `shared/instructions/*.md` + `usecases/<pack>/instructions/*.md`, concatenated. Distinct from
@@ -474,6 +498,16 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     # "0" is a real answer. Turn it on for packs where 0 almost always means a filter or status label
     # matched nothing (see engine/sql_tool.py: looks_all_zero).
     zero_is_no_data = strict_bool(cfg.get("zero_is_no_data"), False)
+    # OPT-IN: use the pack SKILLS to make the question PRECISE before the first retrieval (skill-informed
+    # query formulation). Default OFF, so packs that don't enable it are byte-for-byte unchanged. See
+    # _frame_question -- it is fail-safe (any drift/error falls back to the raw question).
+    frame_query = strict_bool(cfg.get("frame_query"), False)
+    # OPT-IN safety net (reactive value recovery): the OPTIONAL note/skills make the FIRST query precise;
+    # if a query still comes back EMPTY, look up the real distinct values of these declared columns from the
+    # live view and re-ask with the exact stored value (see the reformulate step). Fires ONLY on a blank
+    # retrieval, once per session (cached), and is a NO-OP unless the SQL tool exposes distinct_values()
+    # (Cortex only -> MOCK stays deterministic). Presence of a non-empty list = enabled; unset = unchanged.
+    recover_value_dims = cfg.get("recover_value_dims") or []          # pack-authored 'TABLE.DIM' paths
     for _name, _val, _min in (("max_score", max_score, 1), ("pass_score", pass_score, 1),
                               ("max_iters", max_iters, 0), ("eval_retries", eval_retries, 0),
                               ("max_stall", max_stall, 0), ("max_tool_steps", max_tool_steps, 0),
@@ -490,6 +524,9 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         raise ValueError("pass_score must be <= max_score")
     if max_iters > 10:                                 # keep graph steps under LangGraph's default recursion limit (25)
         raise ValueError("max_iters must be <= 10 (raise LangGraph's recursion_limit if you truly need more)")
+    if recover_value_dims and (not isinstance(recover_value_dims, list)
+            or not all(isinstance(d, str) and d.strip() for d in recover_value_dims)):
+        raise ValueError("recover_value_dims must be a list of 'TABLE.DIM' dimension paths")
     retry_nudge = (f"\n\nYour previous reply could not be parsed. Reply with EXACTLY "
                    f"one line:  SCORE: N/{max_score} - <short reason>")
 
@@ -516,6 +553,11 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     # Load the act-selection prompt once, only for an agentic tools pack (else the file need not exist).
     act_template = _prompt(use_case, "act.md") if (tool_mode == "agentic" and loaded_tools) else ""
     skills = load_skills(use_case, cfg.get("exclude_shared_skills"))
+    # FRAMING subset: the query-formulation step sees only the skills a pack lists in `frame_skills:`
+    # (the value->column maps), so porting many answer-side skills doesn't bloat the framing prompt or
+    # tempt it to over-reach. Unset -> the FULL skill set (backward compatible: goa_spend unchanged).
+    frame_skills_text = (load_named_skills(use_case, cfg.get("frame_skills"))
+                         if cfg.get("frame_skills") else skills)
     exemplars = load_exemplars(use_case)
     # OPERATOR INSTRUCTIONS: injected `instructions=` (DI/runner override) wins, else the pack+shared
     # instruction files. Per-REQUEST instructions (state) are honored ONLY if the pack opts in.
@@ -554,11 +596,72 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
                            "label probably matched nothing. Check which values are actually present.")
         return out
 
+    _kv_cache = {}                                        # lazy, once-per-graph: {"block": <str>}
+
+    def _recover_values_block() -> str:
+        # REACTIVE value recovery (used only after a BLANK retrieval): fetch the real distinct values of the
+        # pack's declared columns ONCE and format them for the reformulate step, so the reword can bind the
+        # user's word to the EXACT stored value (e.g. "active" -> Executed/Approved, "instruments" ->
+        # Instrument). NO-OP unless recover_value_dims is set AND the tool exposes distinct_values() (Cortex
+        # only -> mock/agentic packs get ""). FAIL-SAFE: any error caches "" so the retry just rewords as
+        # before. Cached so it costs one small query per column per session, and ONLY when an empty result
+        # actually triggers it -- questions that return rows on the first try pay nothing.
+        if "block" in _kv_cache:
+            return _kv_cache["block"]
+        block = ""
+        lookup = getattr(sql, "distinct_values", None) if recover_value_dims else None
+        if lookup:
+            try:
+                found = lookup(recover_value_dims) or {}
+            except Exception as e:                        # best-effort: recovery must never break a run
+                log(f"  [recover] value lookup failed: {e}; rewording without live values")
+                found = {}
+            if found:
+                lines = [f"- {path.split('.')[-1]}: " + ", ".join(vals) for path, vals in found.items()]
+                block = ("STORED VALUES (the real values currently in these columns; the user's word may "
+                         "differ -- plural/singular, code vs label -- so map it to the EXACT value shown):\n"
+                         + "\n".join(lines))
+                log(f"  [recover] looked up values for {len(found)} column(s)")
+        _kv_cache["block"] = block
+        return block
+
+    def _frame_question(task: str) -> str:
+        # Skill-informed QUERY FORMULATION (runs BEFORE retrieval): rewrite the user's question into a
+        # precise text-to-SQL request using the pack SKILLS -- e.g. bind "the IT Software category" to the
+        # dimension that actually holds it -- so the tool does not guess the wrong column. This is the ONE
+        # place skills reach the QUERY; generate.md/refine.md see them only when WRITING the answer, AFTER
+        # retrieval (too late to change what rows come back). FAIL-SAFE: any error, an empty reply, or a
+        # rewrite that DRIFTS (subject substituted or a pinned id dropped -- the same guards the
+        # reformulate-retry uses) falls back to the RAW task, so framing can only ADD precision, never
+        # CREATE an escalation (worst case == today's behavior).
+        try:
+            framed = llm.complete(_fill(_prompt(use_case, "frame.md"),
+                                        task=task, skills=frame_skills_text)).strip()
+        except (RuntimeError, EmptyResponseError, ValueError, KeyError) as e:
+            log(f"  [frame] failed: {e}; using original question")
+            return task
+        if not framed or not (_keeps_subject(task, framed) and _keeps_pinned(task, framed)):
+            log(f"  [frame] discarded (empty or drifted); using original question")
+            return task
+        if framed != task:
+            log(f"  [frame] {task}  ->  {framed}")
+        return framed
+
     def generate(s: State) -> State:
         run_id = s.get("run_id", "-")
+        # Skill-informed query formulation (opt-in, fail-safe): use the pack SKILLS to make the question
+        # precise BEFORE retrieval, so the query/tool step doesn't have to guess a dimension. Applies to
+        # any path the QUESTION drives -- the SQL call, the model-driven AGENTIC loop, or deterministic
+        # tools that take the question as input -- but NOT a toolless pack (nothing to retrieve). Falls
+        # back to the raw task on drift/error.
+        analyst_q = s["task"]
+        frames_retrieval = (use_sql or tool_mode == "agentic"
+                            or (tool_mode == "deterministic" and bool(loaded_tools)))
+        if frame_query and frames_retrieval:
+            analyst_q = _frame_question(s["task"])
         # First retrieval is UNGUARDED: a hard error (bad SQL, network) is fatal, matching the
         # "a failed first generate is fatal" rule -- there is nothing to fall back to.
-        data = _retrieve(s["task"], run_id)
+        data = _retrieve(analyst_q, run_id)
         retries = 0
         # A BLANK retrieval does NOT prove the data is missing -- it may be a misread question or a
         # wrong/empty query. On the paths that fire EXACTLY ONCE (the single SQL call, the deterministic
@@ -580,7 +683,8 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
                 # data, not instructions. The drift guards (_keeps_subject/_keeps_pinned) are the
                 # backstop, and the reformulation's OUTPUT is still a read-only text-to-SQL request.
                 new_q = llm.complete(_fill(_prompt(use_case, "reformulate.md"),
-                                           task=s["task"], feedback=hint[:600])).strip()
+                                           task=s["task"], feedback=hint[:600],
+                                           known_values=_recover_values_block())).strip()
             except (RuntimeError, EmptyResponseError, ValueError, KeyError) as e:
                 # a retry that ERRORS is not fatal (unlike the first retrieval): keep the blank marker
                 # and let the loop exhaust its budget, then escalate rather than 500.

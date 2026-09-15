@@ -4,6 +4,9 @@ model doesn't support. Produce ONE corrected question that a text-to-SQL tool ov
 can answer:
 - fix a likely misinterpretation of the intent,
 - narrow to a single subject/entity if a cross-table join looks unsupported,
+- if STORED VALUES are shown below, map the user's word to the EXACT value shown when they differ (a
+  plural vs. singular, a casing difference, or an everyday word vs. a stored code/label); those live
+  values are authoritative,
 - keep the user's original intent — do not invent new constraints or change what is being asked.
 
 HARD RULE — do NOT substitute the subject. The corrected question must still be about the SAME thing
@@ -24,3 +27,5 @@ ORIGINAL QUESTION:
 
 WHY THE TOOL RETURNED NOTHING (its hint):
 {feedback}
+
+{known_values}

@@ -1,3 +1,5 @@
 inherits: [shared]
 name: "KPI / metric analytics"
 sample_task: "What was net revenue last month and how does it compare to the prior month?"
+# Skill-informed query framing (opt-in, fail-safe); falls back to the raw question on any drift.
+frame_query: true

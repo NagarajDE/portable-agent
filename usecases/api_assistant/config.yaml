@@ -1,6 +1,9 @@
 inherits: [shared]
 name: "API assistant (generic, non-SQL example)"
 sample_task: "Is the orders service healthy, and who owns it?"
+# Skill-informed query framing (opt-in, fail-safe). This pack's tools take the question as input rather
+# than a text-to-SQL query, so framing's value is limited here; it falls back to the raw question on drift.
+frame_query: true
 
 # Non-SQL agent: opt OUT of the shared SELECT-only skill so SQL rules aren't injected here (#7).
 exclude_shared_skills: [sql_safety]

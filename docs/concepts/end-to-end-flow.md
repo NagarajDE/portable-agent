@@ -21,9 +21,9 @@ When the agent starts (`build_graph` in [`engine/graph.py`](../../engine/graph.p
 with the shared tier and holds it in memory:
 
 ```
-config.yaml (+ inherits: [shared])   →  scale, thresholds, tool list
+config.yaml (+ inherits: [shared])   →  scale, thresholds, tool list, flags (e.g. frame_query)
 skills/     (shared + pack)           →  concatenated
-prompts/*.md (pack ELSE shared)       →  generate.md / rubric.md / refine.md
+prompts/*.md (pack ELSE shared)       →  generate.md / rubric.md / refine.md (+ frame.md when frame_query)
 exemplars/*.yaml (pack)               →  few-shot examples
 tools: / SQL                          →  the evidence source
 ```
@@ -39,11 +39,19 @@ user question
      │
      ▼
 ┌─────────────────────────────┐
+│ FRAME QUESTION  (worker llm)│  OPT-IN (frame_query): use the pack SKILLS (an optional FYI note) to
+│  → precise query text       │  rewrite the question so it names the RIGHT column/measure BEFORE
+└──────────────┬──────────────┘  retrieval. Fail-safe: drift/empty/error → raw question. Off by default.
+     │
+     ▼
+┌─────────────────────────────┐
 │ GATHER EVIDENCE             │  read-only tools  OR  sql.ask()
 │  → data / observations      │
 └──────────────┬──────────────┘
                ▼
-        got usable data? ─── no ──►  reformulate the QUESTION + re-retrieve (×max_data_retries)
+        got usable data? ─── no ──►  reformulate + re-retrieve (×max_data_retries).
+               │                     recover_value_dims: on empty, look up the column's REAL values
+               │                     (Cortex only, cached) and re-ask with the EXACT stored value.
                │                                   │
                │                      still blank / rewrite rejected
                │                                   ▼
@@ -79,6 +87,28 @@ What this shows:
 - **Evidence first, deterministically.** The model never *picks* a tool — the engine runs the pack's
   read-only tools (or the single SQL call) up front and hands the result in as `data`. (Injection-safe:
   tool output can't trigger another tool call.)
+- **Skills can shape the QUERY, not just the answer (opt-in).** When a pack sets `frame_query: true`, the
+  worker first rewrites the question into a precise text-to-SQL request using the pack's framing `skills`
+  (the `frame_skills` subset — a focused value→column map, so porting many answer-side skills doesn't bloat
+  the framing prompt) — e.g. binding *"the IT Software category"* to the `ExecutiveCategory` dimension the
+  value actually lives in, so the query tool doesn't guess the wrong column and return zero rows. The
+  rewrite is **minimal**: it binds a named value to its column and names the measure, and must not add a
+  filter, date grain, scope, or derived metric the user didn't ask for. This runs before whatever retrieval
+  the question drives (the SQL call, the deterministic tool sweep, or the agentic tool loop). It is the
+  **one** place skills reach the *query*; `generate.md`/`refine.md` see the FULL skill set only when
+  *writing* the answer — **after** retrieval, too late to change which rows come back. It is **fail-safe**:
+  any error, an empty reply, or a rewrite that *drifts* (subject substituted or a pinned id dropped — the
+  same guards the reformulate-retry uses) falls back to the raw question, so framing can only *add*
+  precision, never *create* an escalation. Separately, `recover_value_dims` adds a **safety net**: if a
+  query comes back **empty**, the reword step is handed the column's **real distinct values** (fetched from
+  the live view, Cortex-only, cached) so it re-asks with the **exact stored value** — "active" → the actual
+  `BUSINESS_STATUS` values, "instruments" → the stored `Instrument` — fixing what the first-try hint missed.
+  Where skills enter, at a glance:
+
+  ```
+  frame_query OFF:  task ───────────────► [gather evidence] ──► data ──► [write answer  (skills)]
+  frame_query ON:   task ─► [frame (skills)] ─► [gather evidence] ──► data ──► [write answer  (skills)]
+  ```
 - **Groundedness is decided BEFORE the judge, and deterministically.** If retrieval came back blank the
   loop rephrases the question and tries once more; if it is still blank — or the rewrite stopped asking
   the user's question — the run **escalates and the judge never runs**. This matters because an honest
@@ -150,11 +180,12 @@ never trained parameters (see [`evals-and-the-learning-flywheel.md`](evals-and-t
 | artifact | what it does | in the **runtime** path (live question)? | **test-time** only? |
 |---|---|---|---|
 | `config.yaml` (+ `inherits`) | scale, thresholds, tool list | ✅ loaded at start | — |
-| `skills/*.md` | domain/house rules, injected into generate **and** refine | ✅ | — |
+| `skills/*.md` | domain/house rules, injected into generate **and** refine (**and** the query-framing step when `frame_query` is on) | ✅ | — |
 | `prompts/generate.md` | the GENERATE step (always pack-owned) | ✅ | — |
 | `prompts/rubric.md` | the EVALUATE (judge) step | ✅ every question | — |
 | `prompts/refine.md` | the REFINE step | ✅ when below `pass_score` | — |
-| `shared/prompts/reformulate.md` | rephrase the QUESTION after a blank retrieval | ✅ only when retrieval is blank | — |
+| `shared/prompts/frame.md` | rewrite the QUESTION into a precise query using the `frame_skills` note, **before** retrieval (incl. the agentic loop) | ✅ only when `frame_query: true` | — |
+| `shared/prompts/reformulate.md` | rephrase the QUESTION after a blank retrieval (+ the real `recover_value_dims` values, when configured, to re-ask with the exact stored value) | ✅ only when retrieval is blank | — |
 | `exemplars/*.yaml` | few-shot examples in generate | ✅ | — |
 | `tools:` / SQL | gather evidence before generate | ✅ | — |
 | tracer + memory | per-run events and one logged row | ✅ (side effects) | — |

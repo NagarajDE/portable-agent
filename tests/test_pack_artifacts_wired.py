@@ -56,6 +56,16 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", _boom)
 
 
+@pytest.fixture(autouse=True)
+def _no_framing(monkeypatch):
+    """These tests assert prompt ORDER (prompts[0]=generate, prompts[1]=refine). Skill-informed framing
+    (frame_query) prepends an extra worker call, shifting the indices. Framing wiring is covered in
+    tests/test_grounding.py; here we neutralize it so the generate/refine/rubric assertions stay valid
+    regardless of which packs enable frame_query."""
+    real = G.load_config
+    monkeypatch.setattr(G, "load_config", lambda uc: {**real(uc), "frame_query": False})
+
+
 def _shared_only_line(shared_path, pack_path) -> str:
     """A distinctive shared-rubric line that does NOT appear in the pack rubric -- used to prove an
     override REPLACES (not concatenates) the shared rubric."""

@@ -1,7 +1,190 @@
 # Test campaign — what actually works vs. what was only theoretical
 
-Four rounds, newest first. Environment for all: Windows, Python 3, local `.env` pointed at Snowflake
+Seven rounds, newest first. Environment for all: Windows, Python 3, local `.env` pointed at Snowflake
 account `illumina`. Memory (thread/session) is not built yet and is out of scope by design.
+
+---
+
+# Round 7 — reactive value recovery (one coherent translation pipeline)
+
+Date: 2026-09-14 · Under test: **uncommitted working tree on `main`** (parent `9293118`)
+Question being answered: *users type everyday words ("active", "instruments") but the database stores exact
+values ("Executed"/"Approved", "Instrument") — where should that translation live, without reactive
+patching?* → **One layered pipeline: an optional FYI note guides the first try; a live value lookup is a
+safety net that fires only when a query comes back empty.**
+
+Supersedes the intermediate "discovery feeds framing" build (which looked up values proactively before
+every query): after a design review the lookup was made **reactive** (fires only on an empty result,
+reusing the retry loop the engine already had) and the redundant always-on path + per-pack value lists were
+removed. Less machinery, not more.
+
+## 7.1 The design (three layers, each covers what the one above missed)
+- **Optional note (`dimension_map.md`, via `frame_skills`)** — soft FYI: says *which column* a value lives
+  in; any values are examples, never authoritative. Present → the first query is likely right (no wasted
+  round-trip). Absent → skipped. A stale note is harmless.
+- **Reactive live lookup (`recover_value_dims`)** — the safety net. On an **empty** result, fetch the
+  column's real distinct values, re-ask with the exact match, retry once. Zero cost when the first try
+  works; the live values are the single source of truth.
+- **Semantic-view enrichment** — the ideal upstream fix (synonyms / sample values in the model); makes the
+  layers above unnecessary and helps the native agents too. Out of engine scope; recommended in docs.
+
+## 7.2 What changed
+| Area | Change |
+|---|---|
+| `engine/sql_tool.py` | Optional `CortexAnalystTool.distinct_values(dim_paths)` — `SELECT * FROM SEMANTIC_VIEW(view DIMENSIONS TABLE.DIM) LIMIT N` per column; read-only, bounded, best-effort. Mock/Genie omit it, so the lookup **no-ops off-Cortex**. |
+| `engine/graph.py` | Value lookup moved INTO the `is_no_data` retry loop (reactive), cached once per session; the proactive call was removed. Its values feed `reformulate.md`. |
+| `shared/prompts/reformulate.md` | Gains a `{known_values}` block + a generic rule: map the user's word to the exact stored value shown (plural/singular, code vs label). |
+| `shared/prompts/frame.md` | Back to generic first-try framing only (no `KNOWN VALUES` block); treats any note values as FYI. |
+| Skills | The 3 `dimension_map.md` reframed as OPTIONAL FYI hints (column mappings + example values; live data is authoritative). |
+| Config | Three `frame_discover*` knobs consolidated into one: `recover_value_dims: [TABLE.DIM]` (presence = enabled). Set on `goa_spend`, `inventory_balance`, `procurement_contracts`. |
+
+## 7.3 Offline verification
+| Phase | Result |
+|---|---|
+| Unit suite (`pytest -q`) | **301 passed** (5 reactive tests: values reach the reformulate prompt on empty; NOT fetched when the first query returns rows; no-capability / error → plain reword; misconfig raises at build) |
+| Golden evals, all packs | **16/16** — the lookup no-ops on MOCK, the empty-result reword path is unchanged |
+
+## 7.4 Live Cortex (worker `claude-opus-5`, judge `claude-opus-4-8`)
+
+One run exercised both layers, and recovery fired only when actually needed (1 of 3):
+
+| Pack | Question | First-try framing | Recovery? | Outcome |
+|---|---|---|---|---|
+| `procurement_contracts` | top 10 **active** contracts by value | `BUSINESS_STATUS = 'active'` (missed) | **yes** — `[recover]` → reworded to status `Executed` | ok 15/18 — grounded (AGRMSA3058 / UPS ASIA $29.1M) |
+| `goa_spend` | average invoice for the **IT Software** category | `ExecutiveCategory = 'IT Software'` (hit) | no | ok 16/18 — grounded ($32,236.76) |
+| `inventory_balance` | total inventory value for **instruments** | `ProductType = 'Instrument'` (hit, singular) | no | ok 15/18 — grounded ($138.82M) |
+
+The procurement case is the proof of the safety net: the first try used the literal `'active'` (which
+matches nothing), the query came back empty, `[recover]` looked up the real `BUSINESS_STATUS` values, and
+the reword retried with `Executed` → grounded. goa and inventory show the efficiency win — the optional note
+got the first try right, so **no lookup fired at all**. Recovery only paid its cost where it was needed.
+
+---
+
+# Round 6 — Option-2 framing (minimal) + enabled on all packs + native skill port
+
+Date: 2026-09-14 · Under test: **uncommitted working tree on `main`** (parent `9293118`)
+Question being answered: *make framing rewrites minimal (bind value→column only), turn it on everywhere,
+and port the native agents' skills.* → **Fix preserved with leaner rewrites; no offline regression.**
+
+## 6.1 What changed
+
+| Area | Change |
+|---|---|
+| `shared/prompts/frame.md` | Tightened to **Option 2**: bind a named value to its column + name the measure ONLY; forbid adding filters, date grains, scope, or derived metrics the user didn't ask for; return unchanged when there's nothing to bind. |
+| `engine/graph.py` | New **`frame_skills`** knob (framing uses a focused subset; default = all skills; answer/refine always use the full set). Framing gate widened to the **agentic** path (framed once before the ReAct loop). |
+| Native skill port | Read all 4 native agents via `DESCRIBE AGENT` + a temp file format. Only **goa_spend** (9 stage skills) and **inventory** (7) had stage skills; **icertis** (`skills:[]`) and **procurement_contracts** (bare assistant) had none. Ported goa_spend's 8 + inventory's 7 as concise domain skills (rules/columns, no SQL/output-template copy). |
+| Framing maps | `goa_spend/skills/dimension_map.md` (supersedes `category_map.md`), `inventory_balance/skills/dimension_map.md`, and `procurement_contracts/skills/dimension_map.md` (status-aware, added in the 6.4 fix); `icertis_procurement` keeps `contract_analytics.md` because its semantic view is already instrumented (see 6.4). |
+| Config | `frame_query: true` on **all 10 packs**; `frame_skills` set on the 4 AI+BI packs. |
+
+## 6.2 Offline verification
+
+| Phase | Result |
+|---|---|
+| Unit suite (`pytest -q`) | **296 passed** (added `frame_skills`-subset, agentic-framing, and `load_named_skills` tests; neutralized framing in the artifact-wiring tests so their prompt-order assertions stay valid) |
+| Golden evals, 10 packs | **15/15** — framing on every pack falls back to raw in MOCK (a no-op), so no regression |
+
+## 6.3 Live Cortex — goa_spend (worker `claude-opus-5`, judge `claude-opus-4-8`)
+
+| Kind | Question | Framed to (now LEAN) | Outcome |
+|---|---|---|---|
+| POS | total indirect spend by year | "total indirect spend **(InvoiceUSD)** by year" | ok 17/18 r0 (~$4.96B) |
+| POS | cost centers highest spend | "which cost centers **(CostCenter)** …indirect spend **(InvoiceUSD)**" | ok 15/18 r0 |
+| **POS (fixed)** | **average invoice for the IT Software category** | **"average InvoiceUSD where ExecutiveCategory = 'IT Software'"** | **ok 16/18 r0 — $21,339.34** |
+| NEG | full-time employees in procurement | *(unchanged)* | `out_of_scope` (correct) |
+
+The scope/date/share padding the verbose Round-5 framing added is **gone** — rewrites now only bind the
+column and name the measure. The IT Software fix is preserved.
+
+**Trade-off observed (honest):** with less steering, Analyst has more latitude on *open-ended* aggregations
+— the "highest cost centers" run returned smaller per-cost-center totals than the verbose-framed Round-5
+run (both grounded/scored, but differently aggregated). Precise value→column questions (the IT Software
+class this feature targets) are unaffected.
+
+**Full live round (all 4 AI+BI agents, 2 pos + 1 neg each):** 11/12 correct. Bindings proven live on the
+newly-enabled packs — goa IT Software→`ExecutiveCategory` ($21,339); goa vendors→`ParentVendorName`
+($181.9M); inventory "Consumables"→`ProductType` ($405.27M); inventory plants→`Plant` (3300 $224.67M). All
+negatives `out_of_scope`. `icertis_procurement` framing was a **no-op** (its `contract_analytics.md` names
+no values to bind) yet results were correct (16/18).
+
+## 6.4 Live — the `procurement_contracts` framing fix (applied + confirmed)
+
+The full round surfaced one **framing-induced regression** on `procurement_contracts`: "total active
+contract value, top 10 suppliers" framed to `… WHERE BUSINESS_STATUS is active …` → **0 rows → `no_data`**.
+Root cause: its `frame_skills` reused `contract_rules.md`, which names the *column* (`BUSINESS_STATUS`) for
+active/expired but not the actual *values*, so the worker invented the literal `'active'` — which does not
+exist (real values: Executed, Approved, Expired, Terminated, Cancelled, On Hold, Draft, and 7 workflow
+states).
+
+**Fix applied (uncommitted):** authored `procurement_contracts/skills/dimension_map.md` listing the real
+values ("active"/"live" = `BUSINESS_STATUS IN ('Executed','Approved')`, "expired" = `'Expired'`, full
+14-value list, **no literal `active`**) + the value measure (`UPDATED_CONTRACT_VALUE` else
+`CONTRACT_VALUE`) and supplier/category/geo/code bindings; pointed `frame_skills: [dimension_map.md]`.
+
+| Kind | Question | Framed to | Outcome |
+|---|---|---|---|
+| **POS (fixed)** | top 10 active contracts by contract value | "top 10 contracts where **`BUSINESS_STATUS IN ('Executed','Approved')`** by contract value (`UPDATED_CONTRACT_VALUE` when present, else `CONTRACT_VALUE`)" | **ok 15/18 — grounded** (AGRMSA3058 / UPS ASIA GROUP $29.1M) |
+| POS (control) | which sourcing categories have the highest total contract value | "which **`SOURCING_CATEGORY`** values have the highest total contract value …" | ok 16/18 — grounded (IT Software $360.0M) |
+
+296 pytest still green after the change.
+
+**`icertis_procurement` deliberately left unchanged (investigated, not a fix).** Its view
+`OPERATIONS_DEV.OPERATIONS_SANDBOX.ICERTIS_PROCUREMENT_ANALYTICS` is **multi-table** (MSA / SOW / SOW_AMEND,
+each with its own status dimension mapping to `BusinessStatus`) and already carries synonyms plus a baked-in
+`CUSTOM_INSTRUCTION`: *"For active contracts use BusinessStatus IN ('Executed','Approved')"* and *"Contract
+values stored as VARCHAR — always use TRY_TO_DOUBLE."* That is why its framing was a safe no-op and it still
+scored 16/18. Adding an unqualified status map would risk multi-table `BUSINESS_STATUS` ambiguity, so the
+well-instrumented view is the enrichment — no `dimension_map.md` for icertis.
+
+---
+
+# Round 5 — skill-informed query framing (`frame_query`)
+
+Date: 2026-09-14 · Under test: **uncommitted working tree on `main`** (parent `9293118`)
+Question being answered: *why did the native GOA agent answer "average invoice for the IT Software
+category" while ours escalated — and does closing that gap regress anything?* → **The fix works; nothing
+regresses.**
+
+## 5.1 Root cause (not a rubric/threshold bug)
+
+Given the RAW question, Cortex Analyst guessed the wrong column — `SpendCategory = 'IT Software'` (0 rows)
+— instead of `ExecutiveCategory = 'IT Software'` (22,364 rows). Both are real, separate columns in
+`BV_IndirectSpendDetail`. The native agent hits the **same** semantic view but frames the query with its
+skills + orchestration; our pack passed skills only to answer-synthesis (`generate.md`/`refine.md`),
+**after** retrieval — too late to change which rows came back. The design gap: **skills never reached the
+query.**
+
+## 5.2 The fix — skills inform the QUESTION before retrieval
+
+Opt-in, fail-safe pre-retrieval step (`frame_query: true`): the worker rewrites the question into an
+Analyst-precise one using the pack skills, reusing the existing drift guards (`_keeps_subject` /
+`_keeps_pinned`); any drift, empty reply, or error falls back to the raw question. New:
+`shared/prompts/frame.md`, `engine/graph.py:_frame_question`, and `usecases/goa_spend/skills/category_map.md`
+(port of the native `category_drilldown` skill). Only `goa_spend` enables it.
+
+## 5.3 Offline verification
+
+| Phase | Result |
+|---|---|
+| Unit suite (`pytest -q`) | **293 passed** (289 + 4 framing tests: rewrite happens; drift→raw; empty→raw; flag-off byte-identical) |
+| Golden evals, 10 packs | **15/15** — `goa_spend` passes in MOCK because framing falls back to raw (a no-op without a real model) |
+| Other 3 AI+BI packs | unchanged: `frame_query` unset → framing gated off (proven by `test_framing_off_sends_raw_question`) |
+
+## 5.4 Live Cortex — goa_spend Round-5 set (worker `claude-opus-5`, judge `claude-opus-4-8`)
+
+| Kind | Question | Framed to | Outcome |
+|---|---|---|---|
+| POS | total indirect spend by year | signed InvoiceUSD by fiscal year, all spend incl. NULL `ExecutiveCategory` | ok 17/18 r0 (~$4.96B) |
+| POS | cost centers highest spend | sum of signed InvoiceUSD, ranked, with share | ok 15/18 r0 |
+| **POS (fixed)** | **average invoice for the IT Software category** | **AVG InvoiceUSD where `ExecutiveCategory = 'IT Software'`** | **ok 15/18 r0 — $21,339.34** (was `no_data`) |
+| NEG | full-time employees in procurement | *(unchanged — no skill binding)* | `out_of_scope` (correct) |
+| NEG | current cash balance | *(unchanged)* | `out_of_scope` (correct) |
+| NEG (bogus) | spend for category 'Quantum Teleportation' | `ExecutiveCategory = 'Quantum Teleportation'` | ok 18/18 r1 — honest "not a category; the 13 valid values are …" (grounded, no fabrication) |
+
+**Read:** the previously-failing IT Software question now returns the correct **$21,339.34 on the first
+try** (r0, no reformulation needed); framing left the two purely out-of-scope questions **untouched** so
+they still escalate `out_of_scope`; and the bogus category produced a **grounded honest** answer (it lists
+the real categories) rather than a fabricated number. Framing only ever *added* precision.
 
 ---
 

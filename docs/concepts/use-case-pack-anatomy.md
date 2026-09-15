@@ -30,7 +30,9 @@ Copy `usecases/_TEMPLATE/` to start — it's a runnable minimal pack. See sectio
 ### What each file is for
 - **config.yaml** — the knobs: `inherits: [shared]`, a human `name`, a `sample_task`, and optionally
   `tools:`, scoring (`max_score`, `pass_score`/`threshold`), `max_iters`, `eval_retries`, `max_stall`,
-  `max_data_retries`, `zero_is_no_data`, and `exclude_shared_skills:` (section 4). The two blank-data
+  `max_data_retries`, `zero_is_no_data`, `exclude_shared_skills:` (section 4), and `frame_query` /
+  `frame_skills` (below).
+  The two blank-data
   knobs:
   - **`max_data_retries`** (default `1`, max `5`, `0` = off) — how many times a **blank** retrieval may be
     rephrased and re-tried before the run escalates unscored. See
@@ -39,6 +41,30 @@ Copy `usecases/_TEMPLATE/` to start — it's a runnable minimal pack. See sectio
     `SUM(...) = NULL`) as blank. Opt-in per pack because it is indistinguishable from a genuine zero:
     turn it on where `0` always means "a filter or status label matched nothing" (all four AI+BI packs
     set it), leave it off where `0` is a legitimate answer.
+  - **`frame_query`** (default `false`) — before the **first** retrieval, let the worker rewrite the
+    question into a precise text-to-SQL request using the pack framing `skills` (*skill-informed query
+    framing*), so a named value is bound to the column that actually holds it (e.g. "the IT Software
+    category" → `ExecutiveCategory = 'IT Software'`). The rewrite is **minimal** — it binds a named value
+    to its column and names the default measure, and must NOT add a filter, date grain, scope, or derived
+    metric the user didn't ask for. Fail-safe: any drift, empty reply, or error falls back to the raw
+    question, so it can only *add* precision. It applies to whatever path the question drives — SQL, the
+    agentic tool loop, or deterministic tools — but not a toolless pack. All four AI+BI packs enable it;
+    the example packs enable it too (low value without a semantic view, but harmless). See section 5 and
+    [end-to-end-flow.md](end-to-end-flow.md).
+  - **`frame_skills`** (optional list; default = ALL skills) — the skill files framing uses, so a pack that
+    ships many answer-side skills can keep the framing prompt focused on just its value→column map (e.g.
+    `frame_skills: [dimension_map.md]`). Answer synthesis (`generate.md`) and `refine.md` always use the
+    FULL skill set. Unset means framing sees all skills (unchanged for a pack with a small skill set).
+  - **`recover_value_dims`** (optional list of `TABLE.DIM` paths) — *reactive value recovery (a safety net).*
+    When a query comes back **empty**, the engine looks up the **real distinct values** of these columns from
+    the live view and hands them to the reword step, so it re-asks with the **exact stored value** — "active"
+    → the real `BUSINESS_STATUS` values, "instruments" → the stored singular `Instrument` — instead of a
+    literal that matches nothing. It fires **only on a blank result** (questions that return rows the first
+    time pay nothing), once per session (cached), and is a **no-op** unless the SQL tool exposes
+    `distinct_values()` (Cortex only, so **MOCK stays deterministic**) and fail-safe (any error → the retry
+    just rewords as before). Presence of a non-empty list = enabled. Enabled on `goa_spend`,
+    `inventory_balance`, `procurement_contracts`. The optional note (`frame_skills`) only *hints which column*
+    a value lives in for the first try; the **live values are the source of truth** for what's actually stored.
 - **semantic_layer.yaml** — *Analyst/Genie packs only.* Names the native semantic layer this pack
   queries (Snowflake view / stage-YAML, or Databricks metric-view / Genie-space). Its **presence marks
   the pack as AI+BI-backed**; absent means the engine never looks for one. Read from the pack, never
@@ -144,6 +170,29 @@ ran.
   material description only when the evidence carries one", "lead with the quantified finding".
 
 `inventory_balance/skills/` is written this way (interpret-the-evidence, not shape-the-query).
+
+### Opt-in exception: skill-informed query FRAMING (`frame_query`)
+
+There is one sanctioned way for skills to reach the query — and it shapes the **question**, not the SQL.
+With `frame_query: true` (section 1), the worker rewrites the user's question into a precise text-to-SQL
+request using the pack `skills` **before** the first retrieval; Cortex Analyst then generates the SQL from
+the semantic model exactly as usual. So skills can *disambiguate* ("the IT Software category" → the
+`ExecutiveCategory` dimension that actually holds that value) without ever writing SQL. Query **semantics**
+(default filters, joins, metric SQL) still belong in the semantic model — framing only makes the question
+name the right column/measure so Analyst doesn't guess a wrong one and return zero rows. It is fail-safe
+(a drifting or empty rewrite falls back to the raw question), so enabling it can only *add* precision.
+Each AI+BI pack ships a small value→column map used ONLY for framing (via `frame_skills:`) — e.g.
+`goa_spend/skills/dimension_map.md` (which-column-does-this-value-live-in) — while its larger answer-side
+skills stay out of the framing prompt. All four AI+BI packs enable framing today.
+
+**Reactive value recovery (`recover_value_dims`).** The optional note is only a *first-try hint*: it says
+*which column* a concept lives in, and any values it mentions are FYI examples, not authoritative. The real
+translation happens as a **safety net**: when a query comes back **empty**, the engine looks up the
+column's **real distinct values** from the live view and the reword step re-asks with the **exact stored
+value** — so it never depends on a literal like `'active'` or a mis-cased `Instrument`, and a stale note
+does no harm. It fires **only on a blank result** (no cost when the first try works), is Cortex-only (no-op
+on MOCK), fail-safe, and cached per session; see section 1 for the knob. This is why the notes no longer
+enumerate values — the live data is the source of truth, the note just points to the column.
 
 ### Declaring the semantic layer (Analyst/Genie packs only)
 

@@ -1,3 +1,6 @@
 inherits: [shared]
 name: "DQ – QALS duplicate lots"
 sample_task: "Any duplicate inspection lots in QALS today?"
+# Skill-informed query framing (opt-in, fail-safe). No semantic view here, so it mainly names measures;
+# falls back to the raw question on any drift.
+frame_query: true

@@ -161,6 +161,7 @@ class CortexAnalystTool:
             raise KeyError("Cortex Analyst pack declares no semantic layer: the `snowflake:` block "
                            "in the pack's semantic_layer.yaml needs `view:` (a native Semantic View) "
                            "or `model_file:` (a stage YAML).")
+        self._view = view                                            # "" when using model_file (no TVF)
         from engine.llm_client import snowpark_session
         self._s = snowpark_session()                                 # runs the generated SQL
 
@@ -195,6 +196,46 @@ class CortexAnalystTool:
             statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": str(timeout)})
         text = _rows_to_text(rows[:max_rows])
         return text + ("\n... (additional rows omitted)" if len(rows) > max_rows else "")
+
+    def distinct_values(self, dim_paths, limit: int = 50) -> dict:
+        """OPTIONAL discovery capability for skill-informed FRAMING: return the distinct values of each
+        declared dimension so framing can bind a user's named value to its EXACT stored spelling (and
+        never invent a literal like 'active'). Read-only, bounded, BEST-EFFORT -- a dim that errors, or a
+        non-view semantic layer (model_file, so no SEMANTIC_VIEW() TVF), is silently skipped and the
+        caller degrades to skills-only framing. `dim_paths` are pack-authored `TABLE.DIM` (optionally
+        `DB.SCHEMA.TABLE.DIM`) identifiers -- author config, NEVER user input -- and are id-validated
+        anyway before interpolation."""
+        if not self._view or not dim_paths:                          # model_file packs can't use the TVF
+            return {}
+        limit = max(1, min(int(limit or 50), 1000))                  # bound memory regardless of config
+        timeout = max(1, int(os.getenv("SQL_TIMEOUT_SECONDS", "30")))
+        ident = re.compile(r"^[A-Za-z_][\w$]*(\.[A-Za-z_][\w$]*)+$")  # dotted id path only; else skip
+        out = {}
+        for path in dim_paths:
+            p = str(path).strip()
+            if not ident.match(p):                                   # not a clean TABLE.DIM path -> skip
+                continue
+            q = f"SELECT * FROM SEMANTIC_VIEW({self._view} DIMENSIONS {p}) LIMIT {limit}"
+            try:
+                rows = self._s.sql(q).collect(
+                    statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": str(timeout)})
+            except Exception:                                        # best-effort: one bad dim never breaks framing
+                continue
+            seen, vals = set(), []
+            for r in rows:
+                d = r.as_dict()
+                if not d:
+                    continue
+                v = next(iter(d.values()))                           # one dimension selected -> one column
+                if v is None:
+                    continue
+                s = str(v).strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    vals.append(s)
+            if vals:
+                out[p] = vals
+        return out
 
 
 # Databricks Genie -- text-to-SQL over Unity Catalog (managed MCP tool once deployed).

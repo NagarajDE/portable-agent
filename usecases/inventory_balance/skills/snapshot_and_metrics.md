@@ -1,8 +1,8 @@
 # Skill: inventory snapshot & metrics (how to READ the evidence)
-# The SQL tool (Cortex Analyst) runs the query from the semantic model BEFORE you answer. These
-# rules govern how you INTERPRET the returned evidence and what you tell the user — they do NOT
-# rewrite the query. Query-level semantics (e.g. a default snapshot filter) live in the semantic
-# model, not in this skill.
+# The SQL tool (Cortex Analyst) runs the query from the semantic model BEFORE you answer. These rules
+# govern how you INTERPRET the returned evidence and what you tell the user. Skill-informed framing may
+# bind a named value to its column before the query (see dimension_map.md), but query-level SEMANTICS
+# (e.g. a default snapshot filter, joins) live in the semantic model -- not in this interpretation skill.
 - Each row is a point-in-time position identified by SnapshotDate (a fiscal month-end close).
 - "Current" questions expect the most-recent snapshot. If the evidence carries a MostRecentSnapshot flag or a single latest SnapshotDate, treat it as current state. If it spans MULTIPLE SnapshotDates, do NOT sum across them (that double-counts) — report per snapshot, or say the current snapshot is what's needed.
 - Coverage: Weeks On Hand (external) is the default coverage metric; flag materials below safety-stock coverage when the evidence shows it.

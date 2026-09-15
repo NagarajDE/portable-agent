@@ -3,6 +3,9 @@ name: "Incident triage assistant (agentic tools example)"
 description: "Given an incident question, the MODEL chooses which read-only tools to call (service
   catalog, health endpoint, recent deploys), then explains the likely cause and the owning team."
 sample_task: "Why might orders-api be failing, and who owns it?"
+# Skill-informed query framing (opt-in, fail-safe): the question is framed once BEFORE the agentic tool
+# loop. Inert on the MOCK provider (the agentic loop needs a real model); falls back to raw on drift.
+frame_query: true
 sample_questions:
   - "Why might orders-api be failing, and who owns it?"
   - "Is orders-api affected by a recent deploy?"
