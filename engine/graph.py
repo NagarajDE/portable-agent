@@ -473,6 +473,14 @@ class State(TypedDict):
     data_retries: int         # reformulate-and-retry attempts spent before giving up (observability)
     instructions: str         # per-request OPERATOR instructions (applied only if the pack allows)
     run_id: str               # per-run id; the join key for observability (see engine/tracing.py)
+    # --- multi-step reasoning fields (populated only when reasoning.mode == multi_step) ---
+    plan: dict                # the current Plan (serialized via .model_dump())
+    results: dict             # step_id -> StepResult (serialized)
+    active_step_id: str       # last executed step id (or "" if none)
+    phase: str                # plan|execute|replan|synthesize|done
+    replan_count: int         # how many replans used
+    executed_count: int       # total step dispatches
+    diagnostic: str           # why execution stopped (budget, failure, etc.)
 
 
 def build_graph(use_case: str, llm: LLMClient | None = None,
@@ -508,6 +516,12 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     # retrieval, once per session (cached), and is a NO-OP unless the SQL tool exposes distinct_values()
     # (Cortex only -> MOCK stays deterministic). Presence of a non-empty list = enabled; unset = unchanged.
     recover_value_dims = cfg.get("recover_value_dims") or []          # pack-authored 'TABLE.DIM' paths
+    # --- MULTI-STEP REASONING (opt-in) ---
+    reasoning_cfg = cfg.get("reasoning") or {}
+    reasoning_mode = str(reasoning_cfg.get("mode", "")).strip().lower()  # "" | "multi_step"
+    reasoning_budgets = reasoning_cfg.get("budgets") or {}
+    reasoning_tools_cfg = reasoning_cfg.get("tools") or {}
+    reasoning_skills_cfg = reasoning_cfg.get("skills") or {}
     for _name, _val, _min in (("max_score", max_score, 1), ("pass_score", pass_score, 1),
                               ("max_iters", max_iters, 0), ("eval_retries", eval_retries, 0),
                               ("max_stall", max_stall, 0), ("max_tool_steps", max_tool_steps, 0),
@@ -811,13 +825,57 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     # Observability is applied here, from OUTSIDE the nodes: instrument() wraps each node
     # to emit a timed event (or returns it unchanged when TRACER=none -> zero overhead).
     g = StateGraph(State)
-    g.add_node("generate", instrument("generate", generate, use_case))
-    g.add_node("evaluate", instrument("evaluate", evaluate, use_case))
-    g.add_node("refine", instrument("refine", refine, use_case))
-    g.set_entry_point("generate")
-    g.add_conditional_edges("generate", after_generate, {"evaluate": "evaluate", "escalate": END})
-    g.add_conditional_edges("evaluate", keep_going, {"refine": "refine", "stop": END})
-    g.add_conditional_edges("refine", after_refine, {"evaluate": "evaluate", "stop": END})
+
+    if reasoning_mode == "multi_step":
+        # ---------- MULTI-STEP REASONING PATH ----------
+        # The reasoning subgraph replaces `generate` -- its `synthesize` node writes
+        # the same answer/data/grounded fields, so evaluate->refine works unchanged.
+        from engine.reasoning import build_reasoning_nodes
+        from engine.tools import ToolContext as _RToolCtx
+        r_allowed = set(reasoning_tools_cfg.get("allowed", []))
+        r_tools: dict = {}
+        if loaded_tools:
+            for lt in loaded_tools:
+                if lt.spec.name in r_allowed:
+                    r_tools[lt.spec.name] = (
+                        lambda q, _lt=lt: _lt.tool.run(q, _RToolCtx(run_id="-")))
+        r_plan_skills = (load_named_skills(use_case, reasoning_skills_cfg.get("planning"))
+                         if reasoning_skills_cfg.get("planning") else skills)
+        r_synth_skills = (load_named_skills(use_case, reasoning_skills_cfg.get("synthesis"))
+                          if reasoning_skills_cfg.get("synthesis") else skills)
+        r_nodes = build_reasoning_nodes(
+            use_case, llm, r_tools, r_allowed,
+            planning_skills=r_plan_skills, synthesis_skills=r_synth_skills,
+            max_replans=reasoning_budgets.get("max_replans", 2),
+            max_executed_steps=reasoning_budgets.get("max_executed_steps", 12),
+            max_plan_steps=reasoning_budgets.get("max_plan_steps", 12),
+            verbose=verbose)
+        g.add_node("planner", instrument("planner", r_nodes["planner"], use_case))
+        g.add_node("step_executor", instrument("step_executor", r_nodes["step_executor"], use_case))
+        g.add_node("replan", instrument("replan", r_nodes["replan"], use_case))
+        g.add_node("synthesize", instrument("synthesize", r_nodes["synthesize"], use_case))
+        g.add_node("evaluate", instrument("evaluate", evaluate, use_case))
+        g.add_node("refine", instrument("refine", refine, use_case))
+        g.set_entry_point("planner")
+        _phase_routes = {"execute": "step_executor", "replan": "replan",
+                         "synthesize": "synthesize"}
+        for _src in ("planner", "step_executor", "replan"):
+            g.add_conditional_edges(_src, lambda s: s.get("phase", "synthesize"), _phase_routes)
+        g.add_conditional_edges("synthesize", after_generate,
+                                {"evaluate": "evaluate", "escalate": END})
+        g.add_conditional_edges("evaluate", keep_going, {"refine": "refine", "stop": END})
+        g.add_conditional_edges("refine", after_refine, {"evaluate": "evaluate", "stop": END})
+        log(f"  [graph]    multi-step reasoning ({len(r_allowed)} tools)")
+    else:
+        # ---------- SINGLE-QUERY PATH (unchanged) ----------
+        g.add_node("generate", instrument("generate", generate, use_case))
+        g.add_node("evaluate", instrument("evaluate", evaluate, use_case))
+        g.add_node("refine", instrument("refine", refine, use_case))
+        g.set_entry_point("generate")
+        g.add_conditional_edges("generate", after_generate,
+                                {"evaluate": "evaluate", "escalate": END})
+        g.add_conditional_edges("evaluate", keep_going, {"refine": "refine", "stop": END})
+        g.add_conditional_edges("refine", after_refine, {"evaluate": "evaluate", "stop": END})
     return g.compile()
 
 
@@ -826,4 +884,7 @@ def initial_state(task: str, instructions: str = "") -> State:
             "score": -1, "best_answer": "", "best_score": -1, "best_feedback": "",
             "stall": 0, "iterations": 0, "refine_failed": False,
             "grounded": True, "status": "", "data_retries": 0,
-            "instructions": instructions or "", "run_id": uuid.uuid4().hex[:12]}
+            "instructions": instructions or "", "run_id": uuid.uuid4().hex[:12],
+            # multi-step reasoning (populated by the reasoning subgraph when active)
+            "plan": {"steps": []}, "results": {}, "active_step_id": "",
+            "phase": "", "replan_count": 0, "executed_count": 0, "diagnostic": ""}

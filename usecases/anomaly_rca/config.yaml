@@ -3,3 +3,23 @@ name: "Anomaly root-cause investigation"
 sample_task: "Orders dropped 30% yesterday — why?"
 # Skill-informed query framing (opt-in, fail-safe); falls back to the raw question on any drift.
 frame_query: true
+
+# --- MULTI-STEP REASONING (NEW) ---
+# This pack decomposes RCA questions into adaptive investigation steps:
+#   quantify anomaly -> segment by dimensions -> drill into lead -> correlate -> conclude.
+reasoning:
+  mode: multi_step
+  budgets:
+    max_replans: 2
+    max_executed_steps: 12
+    max_plan_steps: 12
+  tools:
+    allowed:
+      - metrics_query
+      - dimension_breakdown
+      - change_correlator
+  skills:
+    planning:
+      - rca_decomposition.md
+    synthesis:
+      - causal_uncertainty.md
