@@ -35,7 +35,29 @@ Host on Databricks with one shell file.
 > Run locally on Windows against real Snowflake Cortex (or Databricks):
 > [`docs/run-locally-windows.md`](docs/run-locally-windows.md).
 
-## Layout
+## Repository map (what's source vs. everything else)
+
+Every top-level entry, labeled — so it's obvious at a glance what's code and what isn't:
+
+| Path | Kind | What it is |
+|---|---|---|
+| `engine/` | **source** | the generic, portable loop + adapters (touch rarely) |
+| `shared/` | **source** | conventions every pack inherits (base prompts, skills, defaults) |
+| `usecases/` | **source · packs** | one folder = one agent (config + prompts + skills + exemplars + evals) |
+| `tests/` | tests | the pytest suite — never shipped or deployed |
+| `docs/` | docs | concept guides, deployment how-tos, testing notes |
+| `run_local.py` · `run_evals.py` · `chat_local.py` | runners | local dev entry points (they *import* the source; the source never imports them) |
+| `runner_env.py` | runner helper | TEST/DEV-only env→pack overrides — **never read by `engine/`** |
+| `requirements.txt` · `.env.example` | config | dependencies + a template for the dummy local `.env` |
+| `README.md` · `CLAUDE.md` · `GLOSSARY.md` · `PROJECT_CONTEXT.md` | docs | orientation + agent/project memory |
+| `.env` · `.venv/` · `.pytest_cache/` · `__pycache__/` · `.claude/` · `.snowflake/` | generated / local | git-ignored; never committed, never deployed |
+
+> **The one-line rule:** what ships is **`engine/` + `shared/` + `usecases/`** (see
+> `code_paths=["engine","shared","usecases"]`). Everything else — tests, docs, runners, `.env` — is
+> development scaffolding that stays out of the image. If you're unsure whether a file is "the product,"
+> ask: *does it get deployed?*
+
+## Layout (inside the source tiers)
 
 ```
 engine/                       ← GENERIC. shared code. touch rarely.

@@ -17,7 +17,9 @@ Both findings below are independent of the (by-design) lack of cross-turn memory
 > (`known_ids=frozenset()`). No executor change. Regression tests:
 > `tests/test_planned.py::test_parse_plan_accepts_dependency_on_a_frozen_step` (unit) and
 > `::test_replan_can_depend_on_a_frozen_step` (end-to-end: a replan that omits the frozen s1 but still
-> depends on it now validates, reuses s1's result, and recovers s2). The original report follows.
+> depends on it now validates, reuses s1's result, and recovers s2).
+>
+> **Verified live 2026-09-15.** Offline `pytest` **334 passed** (+3 vs the prior 331 — the regression tests above). Live re-run of the exact original failing question → **two clean `replan` events, zero `replan_failed`**, grounded (score 15) in 138s, and the answer honestly opens by flagging the snapshot/data limitation. The proven happy-path 3-step chain is unaffected (grounded, score 18, 90s). The original report follows.
 
 **Symptom (trace):**
 ```
@@ -45,7 +47,7 @@ Only `parse_plan` blocks it.
 
 **Impact:** replan-on-failure is effectively disabled for any chained plan (the common shape). Runs still degrade gracefully (honest partial answer, no fabrication) but never get their intended second attempt.
 
-**Relationship to the earlier F3 fix (important):** F3 fixed the *silence* — it added the `replan_failed` trace event and the one-shot repair retry. That visibility is exactly what **surfaced** BUG-1. F3 is done; BUG-1 is the underlying reason the replan fails, and it is still open. They are two different things.
+**Relationship to the earlier F3 fix (important):** F3 fixed the *silence* — it added the `replan_failed` trace event and the one-shot repair retry. That visibility is exactly what **surfaced** BUG-1. F3 is done; BUG-1 was the underlying reason the replan failed (now **FIXED & verified**). They are two different things.
 
 **Fix (deterministic, minimal) — allow already-succeeded ids as valid dependency targets during replan validation:**
 ```python
@@ -69,7 +71,9 @@ def parse_plan(text, allowed_tools, max_plan_steps, known_ids=frozenset()):
 
 ---
 
-## ISSUE-2 — "Specific open POs / planned orders" is unanswerable; root cause is the semantic view's grain — **Medium, data-model, OPEN (confirmed)**
+## ISSUE-2 — "Specific open POs / planned orders" is unanswerable; root cause is the semantic view's grain — **Data issue — OUT OF SCOPE for this project (flagged for the data owner)**
+
+> **Scope:** per project direction, semantic-view / data-model gaps are **out of scope** for the agent framework — recorded here as a **data issue** for the view owner. No framework change is expected; the agent's behavior is already correct (grounded, no fabrication). Evidence retained below.
 
 **Symptom:** the open-PO step and the planned-order step both returned zero rows; the agent correctly refused to name transaction IDs and returned a grounded partial answer (derived the target material list, flagged the coverage gap, no fabrication).
 
@@ -98,8 +102,8 @@ def parse_plan(text, allowed_tools, max_plan_steps, known_ids=frozenset()):
 
 | ID | Severity | Type | Root cause | Status |
 |----|----------|------|-----------|-----------|
-| **BUG-1** | High | Code (`planned.py`) | `parse_plan` validated deps only against the new plan's step ids; frozen succeeded ids weren't allowed on replan | **FIXED** — `known_ids` added to `parse_plan`, frozen successful ids passed on replan; 2 regression tests |
-| **ISSUE-2** | Medium | Data-model | `INVENTORY_ANALYTICS` = snapshot + aggregated supply only; no order-line transaction grain | OPEN (data/semantic-model owner). **Interim applied** in `disposition_report.md`: "Reduce inbound" → materials/plants for planner review, never fabricated PO/planned-order IDs (matches observed behavior) |
+| **BUG-1** | High | Code (`planned.py`) | `parse_plan` validated deps only against the new plan's step ids; frozen succeeded ids weren't allowed on replan | **FIXED & VERIFIED (2026-09-15)** — `known_ids` in `parse_plan`; 334 pytest (+3 regression) + live re-run replans cleanly, grounded score 15 |
+| **ISSUE-2** | — | Data issue (out of scope) | `INVENTORY_ANALYTICS` = snapshot + aggregated supply only; no order-line transaction grain | Flagged for the data/semantic-model owner; **no framework action**. Agent already behaves correctly (grounded, no fabrication). |
 
 ---
 
@@ -113,7 +117,7 @@ def parse_plan(text, allowed_tools, max_plan_steps, known_ids=frozenset()):
 | F5 | `'Instruments'` (plural) exclusion label echoed into prose | singular `'Instrument'` in `excess_stock_disposition.md` and `disposition_plan.md` |
 | — | s2 forward-demand step intermittently returned EMPTY for the whole material set | `disposition_plan.md` — s2 asks ONE measure + carries a compact comma-separated material-ID list via `{{s1}}`; cross-plant split into s3. `plan.md` — "one concept per step" + "`input` holds only the tool's own fields" |
 
-Post-fix verification: both inventory positives → **18/18** with full material coverage (0 unclassified, empty-steps=0); negatives escalate `no_data` with visible bounded replans. Offline suite: **331 pytest pass** (`tests/test_planned.py` = 29).
+Post-fix verification: both inventory positives → **18/18** with full material coverage (0 unclassified, empty-steps=0); negatives escalate `no_data` with visible bounded replans. Offline suite: **334 pytest pass** (+3 BUG-1 regression tests in `tests/test_planned.py`).
 
 ## By-design (not bugs)
 
