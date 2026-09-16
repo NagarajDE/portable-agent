@@ -2,15 +2,43 @@
 
 **You are:** a principal-level AI systems architect (Claude Fable 5.1) with full authority to redesign
 this repository for the best possible design.
-**Mandate:** review the ENTIRE framework, then redesign it — you may rewrite any code, restructure the
-repo, replace or delete existing agents/packs, and change public interfaces. Nothing here is sacred
-**except the invariants in §3.** Goal: the cleanest, most correct, most portable design that closes the
-known gaps and bugs — not a patch on the current shape.
+**Mandate:** review the ENTIRE framework, then redesign it — greenfield if that's better. You may rewrite
+any code, restructure the repo, replace or delete existing agents/packs, **change or discard any interface,
+and replace the test suite.** Nothing here is sacred — including the current architecture, the module
+boundaries, and the tests. Goal: the cleanest, most correct, most portable design informed by current best
+practice — a fresh rethink, not a patch on the current shape. **§3 is not a cage: it is the list of
+correctness *properties* the current system earned the hard way. Re-justify each one in your new design, or
+consciously replace it with something demonstrably better — just never drop one silently and reintroduce a
+bug we already fixed.**
 
 The project: a portable LangGraph agent (generate → evaluate → refine, scored /N) built to survive a
 Snowflake ↔ Databricks migration with **no retraining** — the model/platform is a swappable component
 behind stable interfaces; all durable value (prompts, skills, rubrics, exemplars, evals) is git-owned
 text. Runs on a MOCK provider with zero credentials; flips to real Cortex/Databricks/LiteLLM by env.
+
+### What this is, and what already works (so you redesign the *right* thing)
+
+A **general-purpose, portable agentic framework**: one generic engine that runs *many* agent use cases,
+each defined as a small "pack" of text (a persona, skills, a rubric, exemplars, evals). A use case = a
+folder, not new code. Three retrieval modes exist today — `deterministic` (engine runs read-only tools
+once), `agentic` (model-driven ReAct), and `planned` (a validated multi-step DAG) — plus a swappable
+LLM/SQL/tracer/memory interface layer, an evaluator that scores every answer, and a deterministic
+"groundedness" guard that escalates instead of fabricating.
+
+**Validated (offline suite green; several live on real Cortex):** the generate→evaluate→refine loop and
+self-correction; grounded scoring + escalation on real SQL; deterministic + agentic + planned multi-step
+(rank → demand-for-those → classify) with step-to-step chaining; the `dispatch()` tool safety boundary;
+LiteLLM gateway; both hosting shells (Snowflake SPCS + Databricks) on mock; single-env-var
+platform/model swap. It genuinely works across BI Q&A, non-SQL tool agents, and multi-step reasoning.
+
+### The one gap — do NOT over-fit the redesign to it
+
+While implementing one BI use case we hit a case the framework doesn't serve cleanly (broadly: very
+open-ended / large-fan-out analytical questions, and a semantic view that lacked the grain a question
+needed). **This is a single-use-case fit issue, not a framework flaw** — a general framework is not
+expected to be optimal for *every* use case, and this one may simply belong elsewhere. Treat it as a
+known, acceptable limitation to note in passing. **Do not reshape the architecture around it, and do not
+let it dominate the redesign** — optimize for the broad set of use cases the framework is meant to serve.
 
 ---
 
@@ -33,8 +61,9 @@ Read these before writing anything. They are the source of truth and the "why."
    `engine/tracing.py` → `engine/memory.py` → `engine/platform_*/` → `shared/` → `usecases/` → `tests/`.
 8. `git log` — the decision trail. Many oddities are hard-won fixes; **read the commit before "simplifying"
    something that looks over-complex.**
-9. `tests/` — treat the suite as the **executable specification** of current behavior (334 tests). A
-   redesign must keep every guaranteed behavior these encode, or consciously and explicitly change it.
+9. `tests/` — a **behavior reference**, not a spec to preserve (334 tests). Mine them for the edge cases
+   and guarantees they encode (that's their value), then write whatever new suite your design deserves.
+   The bar is "every §3 property is covered," not "these exact tests still pass."
 
 ---
 
@@ -66,10 +95,13 @@ Rules of engagement:
 
 ---
 
-## 3. Invariants — MUST survive any redesign (these are correctness, not preference)
+## 3. Correctness properties — re-justify or replace, never silently drop
 
-A "clean rewrite" that reintroduces a fixed bug is a regression. Preserve the *guarantee*; you may change
-the *mechanism*.
+These are not design mandates and not the current mechanisms — they are the *properties* that made the
+system correct, each learned from a real failure. In your fresh design, for each one: keep it (new
+mechanism is fine), or replace it with something provably better and say why. The only hard rule: don't
+lose one by accident and reintroduce a bug we already fixed. A clean rewrite that silently regresses one
+of these is a failure, however elegant.
 
 - **Portability is the point.** Generic core imports no vendor SDK except inside its one adapter class.
   Model/platform swap by config, no code change. All tuning stays git-owned text.
@@ -91,7 +123,7 @@ the *mechanism*.
 - **Deterministic, creds-free tests** — the whole suite runs on the mock with no network; a scripted LLM
   double drives agentic/planned paths.
 
-If you want to change one of these, that's a **separate, explicit proposal with justification** — not a
+Changing one is fine — it just has to be a **conscious, justified decision in the design doc**, not a
 side effect of a refactor.
 
 ---
@@ -114,9 +146,10 @@ replan), propose it.
   wrong-but-confident answer is worse than an honest "can't answer."
 - **The migration constraint is real** — Snowflake↔Databricks is an actual planned move; portability is
   not hypothetical.
-- **Live behavior notes** (see `docs/testing/`): opus-class synthesis is slow on broad inputs; Cortex
-  Analyst intermittently returns empty for over-combined questions; the `INVENTORY_ANALYTICS` view has no
-  transaction grain (some questions are unanswerable by data, not code).
+- **Live behavior notes** (see `docs/testing/`), all tied to the single ill-fitting use case in §0 —
+  context, not design drivers: opus-class synthesis is slow on very broad inputs; Cortex Analyst
+  sometimes returns empty for over-combined questions; the `INVENTORY_ANALYTICS` view lacks the grain a
+  few questions needed (unanswerable by *data*, not code). Note them; don't design around them.
 - **Environment:** Windows; Python 3.14; tests run green offline; the user handles git and live runs.
 
 ---
@@ -159,8 +192,9 @@ The redesign is a long, multi-turn session over a large, mostly-stable context. 
 
 - A written assessment, a target-design doc, and a phased migration plan — all reviewed and approved
   before large-scale edits.
-- `pytest -q` green at every phase; no phase leaves the tree broken.
-- Every §3 invariant provably preserved (a test or a documented argument for each).
+- Tests green at every phase (your new suite); no phase leaves the tree broken.
+- Every §3 property either covered by the new design (a test or a documented argument) or consciously
+  replaced with a justified better alternative.
 - `framework-gaps.md` items each resolved or explicitly deferred with reason.
 - Docs updated for what changed; `CLAUDE.md` decision list extended with the new "why"s.
 - The one-line test still true: **a new agent = a folder of text files; a platform swap = one env var.**
