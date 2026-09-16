@@ -53,15 +53,13 @@ Read these before writing anything. They are the source of truth and the "why."
 4. `docs/concepts/*.md` — the mechanisms in depth: `end-to-end-flow`, `the-refine-loop`,
    `retries-explained`, `tools-and-agents`, `multi-step-planning`, `instructions`, `ai-gateway`,
    `use-case-pack-anatomy`, `access-control`, `evals-and-the-learning-flywheel`.
-5. `docs/design/framework-gaps.md` — the KNOWN GAPS to close (if absent, your first deliverable is to
-   produce it: an inventory of gaps/bugs/tech-debt before you design).
-6. `docs/testing/*.md` — live test reports + the RCA record (real failures found in the field).
-7. The code, in dependency order: `engine/graph.py` → `engine/tools/` (`base`, `dispatch`, `registry`,
+5. `docs/testing/*.md` — live test reports (real behavior observed in the field).
+6. The code, in dependency order: `engine/graph.py` → `engine/tools/` (`base`, `dispatch`, `registry`,
    `orchestrator`, `agentic`, `planned`, adapters) → `engine/llm_client.py` → `engine/sql_tool.py` →
    `engine/tracing.py` → `engine/memory.py` → `engine/platform_*/` → `shared/` → `usecases/` → `tests/`.
-8. `git log` — the decision trail. Many oddities are hard-won fixes; **read the commit before "simplifying"
+7. `git log` — the decision trail. Many oddities are hard-won fixes; **read the commit before "simplifying"
    something that looks over-complex.**
-9. `tests/` — a **behavior reference**, not a spec to preserve (334 tests). Mine them for the edge cases
+8. `tests/` — a **behavior reference**, not a spec to preserve (334 tests). Mine them for the edge cases
    and guarantees they encode (that's their value), then write whatever new suite your design deserves.
    The bar is "every §3 property is covered," not "these exact tests still pass."
 
@@ -71,8 +69,9 @@ Read these before writing anything. They are the source of truth and the "why."
 
 Work in this order; get sign-off at each gate before the next.
 
-1. **Assessment** — a written critique: what's excellent (keep), what's accidental complexity, the gaps
-   in `framework-gaps.md`, the bugs, and the architectural smells. Rank by impact.
+1. **Assessment** — a **holistic** written critique of the whole framework: what's excellent (keep), what's
+   accidental complexity, the real architectural smells, and the bugs/debt *you* judge to matter, ranked by
+   impact. Derive this yourself from the code, tests, and git history.
 2. **Target design** — one document: the redesigned architecture end-to-end (modules, interfaces, data
    flow, the loop, tools, memory, observability, security, deployment, repo layout), with a clear
    **before → after** and the rationale for each change. Call out every interface break.
@@ -195,7 +194,6 @@ The redesign is a long, multi-turn session over a large, mostly-stable context. 
 - Tests green at every phase (your new suite); no phase leaves the tree broken.
 - Every §3 property either covered by the new design (a test or a documented argument) or consciously
   replaced with a justified better alternative.
-- `framework-gaps.md` items each resolved or explicitly deferred with reason.
 - Docs updated for what changed; `CLAUDE.md` decision list extended with the new "why"s.
 - The one-line test still true: **a new agent = a folder of text files; a platform swap = one env var.**
 
@@ -203,6 +201,6 @@ The redesign is a long, multi-turn session over a large, mostly-stable context. 
 
 ## First task
 
-Produce **§2.1 (the assessment)** and, if `docs/design/framework-gaps.md` doesn't exist yet, **create it
-first** as a ranked inventory of gaps/bugs/debt. Do not modify code until the assessment and target
-design are approved.
+Read the context pack (§1), then produce **§2.1 — a holistic assessment of the entire framework**, ranked
+by impact and derived from the code/tests/git history yourself. Do not modify code until the assessment
+and target design are approved.
