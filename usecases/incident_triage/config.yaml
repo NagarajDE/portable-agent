@@ -47,3 +47,7 @@ tools:
         SERVICE     | VERSION | WHEN
         orders-api  | v2.4.1  | 12m ago
         orders-api  | v2.4.0  | 3d ago
+
+# The evaluate->refine loop is OPT-IN (missing/false = the worker's answer is final, UNSCORED). This pack keeps
+# scoring + refining (an evaluator is configured, or inherits the worker on mock).
+loop: true

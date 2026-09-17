@@ -5,6 +5,14 @@ name: "TEMPLATE agent (copy me)"
 description: "One line describing what this agent does (shown to clients via the manifest)."
 sample_task: "What is the total value across items?"
 
+# LOOP vs NON-LOOP (default NON-LOOP). Omit/false -> the worker's answer is final: framing, retrieval
+# (single SQL, deterministic sweep, agentic, planned multi-step), reformulation and the no-data escalation
+# ALL still run; only the judge + refine are skipped and the answer is UNSCORED (score=None, status=ok).
+# `loop: true` -> generate -> evaluate -> refine, scored against the rubric. If `loop: true` but no
+# evaluator can be built (e.g. a model-required provider with no model), the run falls back to non-loop
+# with a WARNING -- never a failed build.
+loop: true
+
 # OPTIONAL 'try these' questions a client/UI shows before the first question (GET /manifest on
 # Snowflake, or the "__manifest__" request on Databricks). Omit this and they DEFAULT to your
 # evals/golden_set.yaml questions, so they track what the pack is actually tested on.
@@ -20,7 +28,8 @@ sample_task: "What is the total value across items?"
 # them unset for the pack to apply. Judge with a DIFFERENT model than the worker (self-grading blind spot).
 # models:
 #   worker:    { provider: cortex,     model: "claude-opus-5" }
-#   evaluator: { provider: cortex,     model: "claude-opus-4-8" }
+#   evaluator: { provider: cortex,     model: "claude-opus-4-8" }   # used only when loop: true
+#   planner:   { provider: cortex,     model: "claude-haiku-4-5" }  # tool_mode: planned only; unset = worker plans
 #   # databricks needs an explicit serving-endpoint name (no default); litellm needs a "provider/model" string.
 
 # OPTIONAL term->value binding (Cortex only; no-op on mock). Profiles the view's LOW-cardinality

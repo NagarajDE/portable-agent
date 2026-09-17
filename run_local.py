@@ -42,6 +42,10 @@ def main():
                      final["status"], final["status"])
         print(f"RESULT     : {label} (escalated, not scored — retries: {final.get('data_retries', 0)})")
         print(f"MESSAGE    : {final['best_answer']}\n")
+    elif final.get("best_score", -1) < 0:
+        # NON-LOOP pack (no `loop: true`, or the evaluator could not be built): grounded, but no judge ran.
+        print("SCORE      : n/a (pack runs without the evaluate/refine loop — unscored by design)")
+        print(f"ANSWER     : {final['best_answer']}\n")
     else:
         # denominator is max_score (the score's scale), NOT threshold/pass_score (the stop bar)
         print(f"BEST SCORE : {final['best_score']}/{cfg.get('max_score', 18)}")

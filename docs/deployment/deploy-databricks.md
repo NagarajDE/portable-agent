@@ -145,21 +145,32 @@ working example for your endpoint. Use that if the SDK call shape drifts.)*
 
 ## 7. Switch from MOCK to real (later)
 
-1. **Wire the stubbed adapters** (one-time dev task):
-   - `engine/llm_client.py` → `DatabricksClient` (Foundation Model API; OpenAI-compatible).
-   - `engine/sql_tool.py` → `GenieTool` (Genie conversation API; currently `raise NotImplementedError`).
-2. **Provide the endpoint what those need**, via `environment_vars` on `agents.deploy(...)`:
+Both Databricks adapters are **wired**: `DatabricksClient` (Foundation Model API, OpenAI-compatible;
+or prefer `provider: litellm, model: databricks/<endpoint>`) and `GenieTool` (`SQL_TOOL=genie`: Genie
+Conversation API → the generated SQL is captured + read-only-checked → Genie's query result is the
+evidence; zero rows / a clarification → the `NO_DATA` sentinel, exactly like Cortex Analyst).
+
+1. **Declare the Genie space in the PACK** (functional config lives in the pack, never in env):
+   ```yaml
+   # usecases/<pack>/semantic_layer.yaml
+   databricks:
+     genie_space: 01ef1234abcd5678          # REQUIRED for SQL_TOOL=genie
+     metric_view: main.gold.my_metric_view  # OPTIONAL: enables term->value binding (needs a warehouse id)
+   ```
+2. **Provide the endpoint the credentials**, via `environment_vars` on `agents.deploy(...)`:
    ```python
    environment_vars={
-       "USE_CASE": "dq_qals",
-       "WORKER_PROVIDER": "databricks",
+       "USE_CASE": "<pack>",
+       "WORKER_PROVIDER": "databricks", "WORKER_MODEL": "<serving-endpoint>",   # or litellm + databricks/<endpoint>
        "SQL_TOOL": "genie",
        "DATABRICKS_HOST": "https://<your-workspace-host>",
        "DATABRICKS_TOKEN": "{{secrets/<scope>/<key>}}",   # use a Databricks secret, not a literal
-       "GENIE_SPACE_ID": "<your genie space id>",
+       "DATABRICKS_WAREHOUSE_ID": "<sql warehouse id>",   # OPTIONAL: only for metric-view value binding
+       "GENIE_TIMEOUT_SECONDS": "120",                    # OPTIONAL: Genie plans + runs the SQL
    }
    ```
-   (Store the token in a **Databricks secret scope**; don't paste it in the notebook.)
+   (Store the token in a **Databricks secret scope**; don't paste it in the notebook. The token needs
+   CAN RUN on the Genie space and SELECT on its tables — Genie runs queries as the caller.)
 3. Re-run the deploy cell. Tip: test with `WORKER_PROVIDER=databricks` + `SQL_TOOL=mock`
    first to isolate the LLM path from the Genie path.
 
@@ -171,6 +182,6 @@ working example for your endpoint. Use that if the SDK call shape drifts.)*
 |---|---|
 | `python_model` path not found | Run the notebook from **inside the cloned repo folder** so `engine/…` resolves. |
 | `ModuleNotFoundError` at serving | A dep missing from `pip_requirements` — keep the list above (incl. `pydantic`). |
-| Endpoint `READY` but query errors | You deployed without the mock `environment_vars`, so it defaulted to the stubbed `databricks`/`genie` adapters. Redeploy with the mock env from step 3. |
+| Endpoint `READY` but query errors | You deployed without the mock `environment_vars`, so it defaulted to the live `databricks`/`genie` adapters without a model / token / Genie space. Redeploy with the mock env from step 3, or configure §7. |
 | UC register fails | Wrong catalog/schema or missing `CREATE MODEL`; ask your workspace admin. |
 | Don't know the query format | Use the endpoint's **Query** UI panel — it shows a working example. |

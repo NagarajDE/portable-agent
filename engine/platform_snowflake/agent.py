@@ -57,8 +57,14 @@ class AskRequest(BaseModel):
 
 
 class AskResponse(BaseModel):
+    """The UNSCORED-OUTPUT CONTRACT: `status` says whether the answer is usable (ok) or escalated to a
+    human (no_data / out_of_scope); `score` says whether a judge graded it. They are independent axes:
+      status=ok,       score=<int> -> loop pack, scored answer (render the score)
+      status=ok,       score=None  -> NON-LOOP pack (no `loop: true`): final worker answer, unscored by
+                                      design -- render the answer, no score badge
+      status=no_data / out_of_scope, score=None -> escalated; render as "needs action", never a pass"""
     answer: str
-    score: int | None    # None unless status == "ok" (an unscored run must never read as a "pass")
+    score: int | None    # None unless a judge scored it (an unscored run must never read as a "pass")
     status: str = "ok"   # "ok" | "no_data" (query ran, nothing there) | "out_of_scope" (this data
                          #   cannot answer that question) -- the latter two are escalated to a human
     grounded: bool = True # False when the answer is NOT backed by retrieved data (present for action)
@@ -104,10 +110,11 @@ def invoke(req: AskRequest, background_tasks: BackgroundTasks) -> AskResponse:
     final = traced_invoke(_graph, initial_state(req.question, req.instructions or ""), USE_CASE)
     background_tasks.add_task(remember_run, final, USE_CASE)   # capture OFF the response path
     status = final.get("status") or "ok"      # "" -> ok; else the escalation REASON, passed through
-    # An escalated run is not scored -> score=None so a client can't read a "pass". Any non-"ok" status
-    # must land here, so this compares against "ok" rather than enumerating the reasons.
+    # score=None whenever NO judge scored the answer: an escalated run (any non-"ok" status) OR a NON-LOOP
+    # pack (best_score stays -1). A client can never read a "pass" that no judge gave.
+    best = final.get("best_score", -1)
     return AskResponse(answer=final["best_answer"],
-                       score=None if status != "ok" else final["best_score"],
+                       score=None if (status != "ok" or best < 0) else best,
                        status=status, grounded=final.get("grounded", True),
                        data_retries=final.get("data_retries", 0),
                        run_id=final["run_id"])

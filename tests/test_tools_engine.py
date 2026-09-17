@@ -48,7 +48,7 @@ class _SpySql:
 def test_legacy_pack_uses_injected_sql_path(monkeypatch):
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 0,
-        "default_sql_tool": "mock"})                    # NO tools key -> legacy path
+        "default_sql_tool": "mock", "loop": True})                    # NO tools key -> legacy path
     spy = _SpySql()
     worker = _CapturingWorker("answer")
     g = build_graph("dq_qals", llm=worker, sql=spy, eval_llm=_Seq("SCORE: 18/18 - ok"), verbose=False)
@@ -60,7 +60,7 @@ def test_legacy_pack_uses_injected_sql_path(monkeypatch):
 # --- NEW: a pack that declares `tools:` runs them and skips the SQL path ----
 def _tools_cfg(**over):
     cfg = {"max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 0,
-           "default_sql_tool": "mock",
+           "default_sql_tool": "mock", "loop": True,
            "tools": [
                {"type": "mock", "name": "catalog", "input": {"query": "${task}"},
                 "params": {"output": "CATALOG_ROWS"}},
@@ -86,7 +86,7 @@ def test_tools_pack_feeds_observations_and_skips_sql(monkeypatch):
 
 def test_tools_pack_substitutes_task(monkeypatch):
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
-        "max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 0,
+        "max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 0, "loop": True,
         "tools": [{"type": "mock", "name": "echo", "input": {"query": "${task}"}}]})  # echoes input
     worker = _CapturingWorker("answer")
     g = build_graph("api_assistant", llm=worker, eval_llm=_Seq("SCORE: 18/18 - ok"), verbose=False)
@@ -99,7 +99,7 @@ def test_tools_pack_substitutes_task(monkeypatch):
 def test_toolless_pack_uses_neither_tools_nor_sql(monkeypatch):
     # M17: explicit `tools: []` is a deliberately toolless agent -> no tool output AND no SQL
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
-        "max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 0, "tools": []})
+        "max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 0, "loop": True, "tools": []})
     spy = _SpySql()
     worker = _CapturingWorker("answer")
     g = build_graph("api_assistant", llm=worker, sql=spy, eval_llm=_Seq("SCORE: 18/18 - ok"),
@@ -144,7 +144,7 @@ def test_jira_style_pack_runs_with_mocks(monkeypatch):
     monkeypatch.setenv("WORKER_PROVIDER", "mock")             # L2: pin the mock provider explicitly
     monkeypatch.setenv("EVAL_PROVIDER", "mock")
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
-        "max_score": 18, "pass_score": 15, "max_iters": 4, "eval_retries": 0,
+        "max_score": 18, "pass_score": 15, "max_iters": 4, "eval_retries": 0, "loop": True,
         "tools": [
             {"type": "mock", "name": "tickets", "input": {"jql": "${task}"},
              "params": {"output": "OPS-1 open; OPS-2 closed"}},

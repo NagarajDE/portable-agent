@@ -25,7 +25,7 @@ class _Sql:
 
 
 _CFG = {"max_score": 18, "pass_score": 18, "max_iters": 1, "eval_retries": 0,
-        "max_stall": 0, "default_sql_tool": "mock"}
+        "max_stall": 0, "default_sql_tool": "mock", "loop": True}
 
 
 def test_di_instructions_reach_generate_refine_and_judge(monkeypatch):

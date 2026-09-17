@@ -32,7 +32,7 @@ class Runtime:
     use_case: str
     cfg: PackConfig
     llm: LLMClient                    # worker: frames, reformulates, generates, refines
-    eval_llm: LLMClient               # judge
+    eval_llm: LLMClient | None        # judge (None when the pack runs NON-LOOP: evaluate never runs)
     retriever: Retriever
     prompt: Callable[[str], str]      # name -> template (pack override else shared)
     skills: str
@@ -128,7 +128,9 @@ def generate(rt: Runtime, s: dict) -> dict:
         # judge never runs) and the surfaces report the REASON: no_data vs out_of_scope.
         return {**s, "data": r.text, "answer": answer, "best_answer": answer, "iterations": 0,
                 "grounded": False, "status": reason, "data_retries": retries}
-    return {**s, "data": r.text, "answer": answer, "iterations": 0,
+    # rev0 is the best answer UNTIL a judge says otherwise -- so a NON-LOOP run (generate -> END) returns it
+    # as-is; with the loop on, `evaluate` overwrites best_answer with the champion as usual.
+    return {**s, "data": r.text, "answer": answer, "best_answer": answer, "iterations": 0,
             "grounded": True, "status": "", "data_retries": retries}
 
 

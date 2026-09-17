@@ -4,10 +4,10 @@ Test the loop **on your laptop**, hitting a real platform — no container, no c
 Same `engine/` + packs as production; only the auth differs (locally you use your own
 credentials; inside SPCS / Model Serving the platform injects a token).
 
-- **Snowflake + Cortex** — fully wired today. This is the path that works end to end. §1–§3.
-- **Databricks + Genie** — the adapters are **stubbed**. You can test the *loop* locally, but
-  hitting real Databricks model serving + Genie needs ~two functions wired first. §4 is honest
-  about exactly what and how.
+- **Snowflake + Cortex** — fully wired and live-verified. §1–§3.
+- **Databricks + Genie** — both adapters are **wired** (`DatabricksClient` / `provider: litellm` for the
+  model, `GenieTool` for `SQL_TOOL=genie`); the Genie path is unit-tested against a fake SDK client and
+  awaits a live run. §4.
 
 > This is a superset of `docs/deployment/deploy-snowflake.md` **Appendix A**, written
 > Windows-first and adding the **existing Semantic View** path. If you only want the Snowflake
@@ -202,8 +202,10 @@ multi-turn memory). Like `run_local.py` / `run_evals.py`, it's a **runner script
 
 ## 4. Databricks locally — honest status
 
-The Databricks worker (`DatabricksClient`) and Genie SQL tool (`GenieTool`) are **stubbed**
-(`raise NotImplementedError` + a `TODO`; see the "Adapter status" note in `CLAUDE.md`). So:
+The Databricks worker (`DatabricksClient`, or `provider: litellm` + `databricks/<endpoint>`) and the
+Genie SQL tool (`GenieTool`) are **wired**. The worker path is live-verified (the `generic_joke` /
+`generic_math` packs); the Genie path is unit-tested against a fake `databricks-sdk` client and still
+needs its first live run. So:
 
 ### 4a. What works **today** — test the loop with a real LLM, mock SQL
 
@@ -220,34 +222,40 @@ SQL_TOOL=mock
 py -3 run_local.py dq_qals
 ```
 
-### 4b. What it takes to hit **real** Databricks + Genie
+### 4b. Hitting **real** Databricks + Genie
 
-Two functions to wire (mirror the working Cortex adapters), each ~20 lines:
+1. The pack declares its Genie space (functional config lives in the pack, never in env):
+   ```yaml
+   # usecases/<pack>/semantic_layer.yaml
+   databricks:
+     genie_space: 01ef1234abcd5678          # REQUIRED for SQL_TOOL=genie
+     metric_view: main.gold.my_metric_view  # OPTIONAL: enables term->value binding (needs a warehouse)
+   ```
+2. `.env` carries only credentials + selection — the same pattern as Snowflake:
+   ```dotenv
+   WORKER_PROVIDER=databricks
+   WORKER_MODEL=<serving-endpoint>         # databricks has NO default model (or use litellm + databricks/<endpoint>)
+   SQL_TOOL=genie
+   DATABRICKS_HOST=https://<your-workspace-host>
+   DATABRICKS_TOKEN=dapi...
+   # DATABRICKS_WAREHOUSE_ID=<sql warehouse id>   # optional: metric-view value binding
+   # GENIE_TIMEOUT_SECONDS=120                    # optional: Genie plans + runs the SQL
+   ```
+   ```powershell
+   py -3 run_local.py <pack>
+   ```
+   `pip install databricks-sdk` for the Genie path. The token needs CAN RUN on the space and SELECT on
+   its tables (Genie runs the SQL as the caller). What you should see in the log: the Genie SQL captured
+   as `last_sql`, rows as `col | col` text, and — for an empty result — the normal reformulate/escalate
+   path, identical to Cortex.
 
-1. `engine/llm_client.py` → `DatabricksClient.complete()` — call your Model Serving /
-   Foundation Model endpoint (the SDK shape + `TODO` are already there).
-2. `engine/sql_tool.py` → `GenieTool` — start/continue a Genie conversation, run the returned
-   SQL (mirror `CortexAnalystTool`; run it through `_ensure_read_only()`).
-
-Then the local pattern is identical to Snowflake — `.env`:
-
-```dotenv
-WORKER_PROVIDER=databricks
-SQL_TOOL=genie
-DATABRICKS_HOST=https://<your-workspace-host>
-DATABRICKS_TOKEN=dapi...
-GENIE_SPACE_ID=01ef...
-```
-```powershell
-py -3 run_local.py dq_qals
-```
-
-Tip: wire and test **one half at a time** — `WORKER_PROVIDER=databricks` with `SQL_TOOL=mock`
-first (isolates the LLM), then flip `SQL_TOOL=genie`. Same isolation logic as §3.
+Tip: test **one half at a time** — `WORKER_PROVIDER=databricks` with `SQL_TOOL=mock` first (isolates
+the LLM), then flip `SQL_TOOL=genie`. Same isolation logic as §3.
 
 > Semantic layer note: on Databricks the equivalent of a Semantic View is a **Metric View**,
-> and Genie is pointed at it via the Genie space — not an env var. It does not share a format
-> with Snowflake's; that's expected (decision #2).
+> and Genie is pointed at it via the Genie space. It does not share a format with Snowflake's;
+> that's expected (decision #2). `metric_view:` in the pack is the space's declared source, used
+> for value lookups — it never bypasses Genie.
 
 ---
 

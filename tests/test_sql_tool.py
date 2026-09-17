@@ -132,11 +132,14 @@ def test_get_sql_tool_cortex_missing_layer_is_guard_railed(monkeypatch):
 
 
 def test_get_sql_tool_genie_selects_databricks_block(monkeypatch):
-    # GenieTool is a stub that raises NotImplementedError at construction; a present databricks
-    # block gets PAST the guard rail (reaching the stub), which proves platform selection works.
+    # a present databricks block gets PAST the guard rail and reaches GenieTool with THAT block (the SDK
+    # client is a seam; here GenieTool is replaced by a recorder so no SDK / creds are needed).
+    import engine.sql_tool as st
+    seen = {}
+    monkeypatch.setattr(st, "GenieTool", lambda block: seen.update(block) or object())
     monkeypatch.setenv("SQL_TOOL", "genie")
-    with pytest.raises(NotImplementedError):
-        get_sql_tool("p", "mock", semantic_layer={"databricks": {"metric_view": "m.s.v"}})
+    get_sql_tool("p", "mock", semantic_layer={"databricks": {"genie_space": "01ef", "metric_view": "m.s.v"}})
+    assert seen == {"genie_space": "01ef", "metric_view": "m.s.v"}
 
 
 def test_get_sql_tool_genie_missing_block_is_guard_railed(monkeypatch):

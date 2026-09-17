@@ -3,3 +3,7 @@ name: "Cross-engine parity – SAP HANA vs Snowflake"
 sample_task: "Do MARA/MARC/MBEW row counts match between SAP HANA and Snowflake?"
 # Skill-informed query framing (opt-in, fail-safe); falls back to the raw question on any drift.
 frame_query: true
+
+# The evaluate->refine loop is OPT-IN (missing/false = the worker's answer is final, UNSCORED). This pack keeps
+# scoring + refining (an evaluator is configured, or inherits the worker on mock).
+loop: true

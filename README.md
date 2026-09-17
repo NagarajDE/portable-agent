@@ -14,7 +14,8 @@ Host on Databricks with one shell file.
 > How the agent improves without retraining (evals vs. exemplars, the learning flywheel):
 > [`docs/concepts/evals-and-the-learning-flywheel.md`](docs/concepts/evals-and-the-learning-flywheel.md).
 >
-> How the refine loop works — refine-from-best, and `max_score` vs `pass_score`:
+> How the refine loop works — it's **opt-in per pack** (`loop: true`; default = worker-only, unscored),
+> refine-from-best, and `max_score` vs `pass_score`:
 > [`docs/concepts/the-refine-loop.md`](docs/concepts/the-refine-loop.md).
 >
 > Access control — who can call an agent, what it can read, and the per-user RLS end goal:

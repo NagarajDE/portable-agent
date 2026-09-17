@@ -84,11 +84,15 @@ def _next_rev(text: str) -> int:        # reads "NEXT_REVISION=N" from the instr
 # REAL ADAPTERS -- same .complete() signature. SDKs imported lazily so the
 # mock path never needs them installed. Fill the TODO, set the env var, done.
 # --------------------------------------------------------------------------
-def _max_tokens() -> int:
+def _max_tokens(override=None) -> int:
     """Output token cap, CLAMPED to >= 1. Default 4096 -- ample for our short answers/one-line
-    verdicts, so truncation is unlikely; raise LLM_MAX_TOKENS if you generate longer outputs. A
-    non-integer raises a clear error here (only on the real-provider path; mock never calls this)
-    rather than a cryptic failure deep inside the provider SDK."""
+    verdicts, so truncation is unlikely; raise LLM_MAX_TOKENS if you generate longer outputs. A caller
+    may pass a PER-CALL `override` (`complete(prompt, max_tokens=N)`) for a call known to be long -- the
+    planner's DAG (engine/tools/planned.py) is the one such caller. A non-integer raises a clear error
+    here (only on the real-provider path; mock never calls this) rather than a cryptic failure deep
+    inside the provider SDK."""
+    if override is not None:
+        return max(1, int(override))
     try:
         return max(1, int(os.getenv("LLM_MAX_TOKENS", "4096")))
     except ValueError:
@@ -103,7 +107,7 @@ class AnthropicClient:
 
     def complete(self, prompt: str, **kw) -> str:
         r = self._c.messages.create(
-            model=self._model, max_tokens=_max_tokens(),
+            model=self._model, max_tokens=_max_tokens(kw.get("max_tokens")),
             messages=[{"role": "user", "content": prompt}])
         if r.stop_reason == "max_tokens":               # truncated: don't treat a cut-off reply as complete
             raise RuntimeError("Anthropic output truncated (hit max_tokens); raise LLM_MAX_TOKENS")
@@ -126,7 +130,7 @@ class CortexClient:
 
     def complete(self, prompt: str, **kw) -> str:
         import json
-        max_tokens = _max_tokens()
+        max_tokens = _max_tokens(kw.get("max_tokens"))
         try:
             row = self._s.sql(
                 "SELECT SNOWFLAKE.CORTEX.COMPLETE(?, PARSE_JSON(?), PARSE_JSON(?)) AS R",
@@ -172,7 +176,7 @@ class LiteLLMClient:
         import litellm
         r = litellm.completion(
             model=self._model, messages=[{"role": "user", "content": prompt}],
-            max_tokens=_max_tokens(), api_base=self._base_url, num_retries=2, timeout=60)
+            max_tokens=_max_tokens(kw.get("max_tokens")), api_base=self._base_url, num_retries=2, timeout=60)
         choice = r.choices[0] if getattr(r, "choices", None) else None
         if choice is not None and getattr(choice, "finish_reason", None) == "length":
             raise RuntimeError("LiteLLM output truncated (finish_reason=length); raise LLM_MAX_TOKENS")
@@ -183,16 +187,40 @@ class LiteLLMClient:
         return str(text)
 
 
-def _databricks_base_url(host: str) -> str:
-    """Normalize DATABRICKS_HOST to the serving-endpoints base URL. Accepts a bare workspace origin OR one
-    that already carries a path (`.../serving-endpoints`) -- the path is stripped, not rejected. Still
-    rejects non-https, credentials-in-URL, query strings and fragments (never a token in a URL)."""
+def _databricks_origin(host: str) -> str:
+    """Normalize DATABRICKS_HOST to a bare https workspace ORIGIN. Accepts an origin OR one that already
+    carries a path (`.../serving-endpoints`) -- the path is stripped, not rejected. Still rejects
+    non-https, credentials-in-URL, query strings and fragments (never a token in a URL). Shared by the
+    native LLM adapter and the Genie SQL tool so both read the host the same way."""
     from urllib.parse import urlsplit
     u = urlsplit((host or "").strip())
     if u.scheme != "https" or not u.hostname or u.username or u.password or u.query or u.fragment:
         raise ValueError("DATABRICKS_HOST must be an HTTPS workspace origin, e.g. "
                          "https://<workspace>.cloud.databricks.com (a path is ignored)")
-    return f"https://{u.netloc}/serving-endpoints"
+    return f"https://{u.netloc}"
+
+
+def _databricks_base_url(host: str) -> str:
+    """The OpenAI-compatible serving base URL for the native Databricks LLM adapter."""
+    return f"{_databricks_origin(host)}/serving-endpoints"
+
+
+_ws_client = None
+_ws_lock = threading.Lock()
+
+
+def databricks_workspace_client():
+    """MEMOIZED `databricks.sdk.WorkspaceClient` -- ONE client serves Genie (+ statement execution) per
+    process, the Databricks analog of `snowpark_session()`. Auth is the SDK's unified auth: DATABRICKS_HOST
+    + DATABRICKS_TOKEN locally, the injected credentials inside Databricks model serving. A DATABRICKS_HOST
+    carrying a path is normalized to its origin (same rule as the LLM adapter). Lazy import."""
+    global _ws_client
+    with _ws_lock:
+        if _ws_client is None:
+            from databricks.sdk import WorkspaceClient          # lazy: only for SQL_TOOL=genie
+            host = (os.getenv("DATABRICKS_HOST") or "").strip()
+            _ws_client = WorkspaceClient(host=_databricks_origin(host)) if host else WorkspaceClient()
+        return _ws_client
 
 
 class DatabricksClient:
@@ -217,7 +245,7 @@ class DatabricksClient:
 
     def complete(self, prompt: str, **kw) -> str:
         r = self._c.chat.completions.create(
-            model=self._model, max_tokens=_max_tokens(),
+            model=self._model, max_tokens=_max_tokens(kw.get("max_tokens")),
             messages=[{"role": "user", "content": prompt}])
         choice = r.choices[0] if r.choices else None
         if choice and choice.finish_reason == "length":  # truncated: don't treat as complete
@@ -404,8 +432,30 @@ def get_eval_client(use_case: str | None = None, cfg_models=None) -> LLMClient:
     return _build(ep, use_case, em)
 
 
+def _resolve_planner(cfg_models) -> tuple:
+    """OPTIONAL third role for `tool_mode: planned`: the PLANNER that emits the DAG. (None, None) unless
+    configured -- then the worker plans. Precedence: PLANNER_PROVIDER/PLANNER_MODEL > pack `models.planner`
+    > (worker). Same M6 rule as the other roles: a pack model belongs to its pack provider."""
+    pcp, pcm = _profile(cfg_models, "planner")
+    pp = _norm_provider(os.getenv("PLANNER_PROVIDER")) or pcp
+    if not pp:
+        return None, None
+    pm = _norm(os.getenv("PLANNER_MODEL")) or (pcm if pp == (pcp or pp) else None)
+    return pp, pm
+
+
+def get_planner_client(use_case: str | None = None, cfg_models=None) -> LLMClient | None:
+    """The PLANNER (planned mode only): a separate, typically FASTER/cheaper model for the structured
+    plan-generation call on the critical path -- the DAG is a schema-following task, not a reasoning one.
+    Returns None when no planner is configured, meaning: use the worker (zero behavior change)."""
+    pp, pm = _resolve_planner(cfg_models)
+    return _build(pp, use_case, pm) if pp else None
+
+
 def model_summary(cfg_models=None) -> str:
-    """One-line RESOLVED worker/evaluator selection for the build log (reports the actual model, or
-    'auto' when the provider picks its own default) (L1)."""
+    """One-line RESOLVED worker/evaluator(/planner) selection for the build log (reports the actual
+    model, or 'auto' when the provider picks its own default) (L1)."""
     wp, wm, ep, em = _resolve_models(cfg_models)
-    return f"worker={wp}:{wm or 'auto'}  evaluator={ep}:{em or 'auto'}"
+    s = f"worker={wp}:{wm or 'auto'}  evaluator={ep}:{em or 'auto'}"
+    pp, pm = _resolve_planner(cfg_models)
+    return s + (f"  planner={pp}:{pm or 'auto'}" if pp else "")

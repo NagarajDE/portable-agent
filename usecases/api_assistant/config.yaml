@@ -37,3 +37,7 @@ tools:
       token_env: API_ASSISTANT_TOKEN          # NAME of an env var; the token VALUE is never stored here
       mock_responses:
         "/health/orders-api": '{"service": "orders-api", "status": "healthy", "uptime_pct": 99.98, "open_incidents": 0}'
+
+# The evaluate->refine loop is OPT-IN (missing/false = the worker's answer is final, UNSCORED). This pack keeps
+# scoring + refining (an evaluator is configured, or inherits the worker on mock).
+loop: true

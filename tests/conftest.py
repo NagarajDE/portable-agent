@@ -9,11 +9,13 @@ import pytest
 _APP_ENV = [
     # loop / provider selection
     "USE_CASE", "WORKER_PROVIDER", "WORKER_MODEL", "EVAL_PROVIDER", "EVAL_MODEL",
+    "PLANNER_PROVIDER", "PLANNER_MODEL", "PLAN_MAX_TOKENS",
     "LLM_MAX_TOKENS", "LITELLM_MODEL", "LITELLM_BASE_URL",
     "ANTHROPIC_MODEL", "CORTEX_MODEL", "DATABRICKS_MODEL",   # per-provider default model
     # SQL tool + semantic-layer override (runner_env)
     "SQL_TOOL", "SQL_MAX_ROWS", "SQL_TIMEOUT_SECONDS",
     "CORTEX_SEMANTIC_VIEW", "CORTEX_SEMANTIC_MODEL", "CORTEX_ANALYST_TIMEOUT_SECONDS",
+    "GENIE_TIMEOUT_SECONDS", "DATABRICKS_WAREHOUSE_ID",
     # Snowflake / Databricks connection + secrets (never let a shell creds env reach a test)
     "SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PAT", "SNOWFLAKE_HOST",
     "SNOWFLAKE_SECONDARY_ROLES", "SNOWFLAKE_WAREHOUSE", "SNOWFLAKE_ROLE",
@@ -24,11 +26,15 @@ _APP_ENV = [
     "MEMORY_STORE", "MEMORY_SQLITE_PATH",
     "TRACER", "TRACE_INCLUDE_CONTENT", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_SERVICE_NAME",
     "TOOL_TIMEOUT_SECONDS", "TOOL_MAX_CONCURRENCY", "HTTP_TOOL_MODE", "HTTP_TOOL_ALLOWLIST",
+    "MCP_ALLOWED_HOSTS",
 ]
 
 
 @pytest.fixture(autouse=True)
-def _isolate_env(monkeypatch):
+def _isolate_env(monkeypatch, request):
+    if request.node.nodeid.startswith("tests/live/"):     # the opt-in LIVE smokes NEED the real env
+        yield
+        return
     for var in _APP_ENV:
         monkeypatch.delenv(var, raising=False)
     import engine.memory as memory

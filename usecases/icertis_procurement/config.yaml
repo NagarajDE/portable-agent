@@ -15,3 +15,7 @@ value_catalog: { max_cardinality: 25 }
 # measure before the Analyst call. frame_skills reuses the pack's column-bearing analytics skill.
 frame_query: true
 frame_skills: [contract_analytics.md]
+
+# The evaluate->refine loop is OPT-IN (missing/false = the worker's answer is final, UNSCORED). This pack keeps
+# scoring + refining (an evaluator is configured, or inherits the worker on mock).
+loop: true

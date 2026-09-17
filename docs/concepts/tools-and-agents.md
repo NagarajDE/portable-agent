@@ -232,13 +232,36 @@ deliberately.
 **MCP** is just another tool source: `type: mcp` (`engine/tools/mcp_tool.py`) exposes one MCP-server
 tool as a `Tool` behind the same `ToolSpec` + `dispatch()`. `read_only` defaults **False**
 (fail-closed) unless the pack sets `read_only: true`. The `mcp` SDK is imported lazily; the live call
-is untested here (like Genie), but its safety is enforced regardless because it goes through dispatch.
+is untested here, but its safety is enforced regardless because it goes through dispatch.
+
+Two transports, chosen by which key the pack sets (exactly one):
 ```yaml
 tools:
-  - type: mcp
+  - type: mcp                       # LOCAL stdio server (a subprocess)
     name: jira
     params: { tool: get_issue, command: "npx -y @modelcontextprotocol/server-jira", read_only: true }
+  - type: mcp                       # REMOTE server over Streamable HTTP (or `transport: sse`)
+    name: tickets
+    params:
+      tool: search_tickets
+      url: https://mcp.example.com/mcp        # https ONLY; no userinfo
+      allow_hosts: [mcp.example.com]          # host allowlist (or MCP_ALLOWED_HOSTS env); empty = deny
+      token_env: TICKETS_MCP_TOKEN            # NAME of the env var holding the bearer token -- never the value
+      read_only: true
 ```
+Remote safety mirrors the http tool: https only, allowlisted host, the host must not resolve to a
+private/loopback address (re-checked right before every connect), the bearer token comes from env only
+and is only ever sent to the configured https origin, and the call is still validated / timed /
+redacted / bounded / approval-gated by `dispatch()`. Misconfiguration (both or neither of
+`command`/`url`, http, an unlisted host, an unknown transport) fails **at build time**, not mid-request.
+
+**Arguments are validated against the server's own schema.** Before `call_tool`, the adapter runs
+`list_tools`, finds the named tool and checks the arguments against its `inputSchema` (type, required,
+enum, `additionalProperties: false`, array items) — a malformed call is a normalized `validation`
+error with a value-free message, and an unknown tool name lists what the server offers. The schema is
+discovered once per tool instance. Non-text content blocks are surfaced as labeled markers
+(`[image: image/png]`, `[resource: <uri>]`, embedded resource text verbatim); `structuredContent` is
+surfaced as JSON when the server returns no text.
 
 ## 10. Planned mode (opt-in) — validated multi-step reasoning
 

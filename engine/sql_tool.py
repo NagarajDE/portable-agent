@@ -64,16 +64,28 @@ def looks_all_zero(data) -> bool:
     return all(empty(c) for c in lines[1].split("|"))
 
 
-def _rows_to_text(rows) -> str:
-    """Format Snowpark result rows into a compact text block for the LLM to read. Truncation is
-    the CALLER's concern -- it slices to the cap and appends its own 'omitted' note -- so there is
-    no row-count branch here (the caller already limited the query to cap+1)."""
+def _table_to_text(cols, rows) -> str:
+    """Format a column list + row lists into the compact `a | b` text block the LLM reads. Zero rows =
+    no usable data (the query ran, matched nothing) -> the NO_DATA sentinel. Truncation is the CALLER's
+    concern (it slices to its cap and appends its own 'omitted' note). Shared by every SQL adapter."""
     if not rows:
-        return no_data()                             # zero rows = no usable data (query ran, matched nothing)
+        return no_data()
+    lines = [" | ".join(str(c) for c in cols)] + [" | ".join(str(v) for v in row) for row in rows]
+    return "\n".join(lines)
+
+
+def _rows_to_text(rows) -> str:
+    """Snowpark rows (`.as_dict()`) -> text, via _table_to_text."""
+    if not rows:
+        return no_data()
     dicts = [r.as_dict() for r in rows]
     cols = list(dicts[0].keys())
-    lines = [" | ".join(cols)] + [" | ".join(str(d.get(c)) for c in cols) for d in dicts]
-    return "\n".join(lines)
+    return _table_to_text(cols, [[d.get(c) for c in cols] for d in dicts])
+
+
+def _enum_value(x) -> str:
+    """The string of an SDK enum (or a plain string), upper-cased; '' for None."""
+    return str(getattr(x, "value", x) or "").upper()
 
 
 def _blank_strings_and_comments(sql: str) -> str:
@@ -268,19 +280,145 @@ class CortexAnalystTool:
         return out
 
 
-# Databricks Genie -- text-to-SQL over Unity Catalog (managed MCP tool once deployed).
-# NOT YET WIRED. Fail fast at construction with an actionable message rather than a late,
-# opaque error mid-request. To run on Databricks today, use SQL_TOOL=mock until this is
-# implemented (mirror CortexAnalystTool: start/continue a Genie conversation, run the SQL).
+# Databricks Genie -- text-to-SQL over a Genie SPACE (Unity Catalog tables and/or a metric view), the
+# Databricks mirror of CortexAnalystTool: one stateless question per call, the generated SQL is captured
+# (`last_sql`) and passed through the read-only backstop, zero rows -> the NO_DATA sentinel, a Genie
+# clarification (no SQL) -> the sentinel carrying the text as the reformulation hint.
+#
+# Pack config (usecases/<pack>/semantic_layer.yaml):
+#     databricks:
+#       genie_space: 01ef...            # REQUIRED for SQL_TOOL=genie -- Genie is addressed by space
+#       metric_view: main.gold.sales    # OPTIONAL: the space's governed data source; with a warehouse
+#                                       #   (DATABRICKS_WAREHOUSE_ID) it enables term->value binding
+# Auth: the Databricks SDK's unified auth (DATABRICKS_HOST + DATABRICKS_TOKEN locally; injected creds
+# inside model serving) via the memoized `databricks_workspace_client()`.
 class GenieTool:
-    def __init__(self, semantic: dict | None = None):    # semantic: the pack's `databricks:` block
-        raise NotImplementedError(
-            "SQL_TOOL=genie is not implemented yet. Use SQL_TOOL=mock on Databricks for now, "
-            "or wire the Genie conversation API here (see engine/sql_tool.py). The pack's "
-            "`databricks:` semantic-layer block (metric_view | genie_space) is passed in here.")
+    def __init__(self, semantic: dict | None = None, client=None):   # semantic: the pack's `databricks:` block
+        space = str((semantic or {}).get("genie_space", "")).strip()
+        self._metric_view = str((semantic or {}).get("metric_view", "")).strip()
+        if not space:                                                # config check FIRST (before any SDK)
+            raise KeyError("Genie pack declares no Genie space: the `databricks:` block in the pack's "
+                           "semantic_layer.yaml needs `genie_space: <space id>` (Genie is called by space; "
+                           "`metric_view:` alone only names the data source).")
+        self._space = space
+        self.last_sql = ""                                           # the SQL Genie last generated (auto value binding)
+        self._dims_cache: list[str] | None = None
+        if client is None:
+            from engine.llm_client import databricks_workspace_client
+            client = databricks_workspace_client()
+        self._w = client
 
-    def ask(self, question: str) -> str:                 # pragma: no cover - unreachable until wired
-        raise NotImplementedError
+    def ask(self, question: str) -> str:
+        from datetime import timedelta
+        timeout = max(5, int(os.getenv("GENIE_TIMEOUT_SECONDS", "120")))   # Genie plans + runs the SQL
+        msg = self._w.genie.start_conversation_and_wait(self._space, question,
+                                                        timeout=timedelta(seconds=timeout))
+        status = _enum_value(getattr(msg, "status", None))
+        if status and status != "COMPLETED":                         # backstop: the SDK waiter normally raises
+            err = getattr(msg, "error", None)
+            raise RuntimeError(f"Genie message ended with status {status}: "
+                               f"{getattr(err, 'error', None) or getattr(err, 'message', None) or 'no detail'}")
+        atts = list(getattr(msg, "attachments", None) or [])
+        query_att = next((a for a in atts if getattr(getattr(a, "query", None), "query", None)), None)
+        if query_att is None:                                        # ambiguous Q / clarification -> no data
+            texts = [getattr(getattr(a, "text", None), "content", "") for a in atts]
+            return no_data("\n".join(t for t in texts if t) or "Genie returned no SQL.")
+        sql = _ensure_read_only(query_att.query.query)               # backstop: SELECT-only, single statement
+        self.last_sql = sql                                          # so a blank can be diagnosed by its predicates
+        res = self._w.genie.get_message_attachment_query_result(
+            self._space, msg.conversation_id, msg.message_id, query_att.attachment_id)
+        return self._statement_text(getattr(res, "statement_response", None), "Genie query")
+
+    @staticmethod
+    def _statement_text(stmt, what: str) -> str:
+        """A Databricks StatementResponse (Genie's query result AND statement execution share the shape)
+        -> the text block, capped at SQL_MAX_ROWS with a visible 'omitted' note."""
+        state = _enum_value(getattr(getattr(stmt, "status", None), "state", None))
+        if state and state != "SUCCEEDED":
+            err = getattr(getattr(stmt, "status", None), "error", None)
+            raise RuntimeError(f"{what} {state}: {getattr(err, 'message', None) or 'no detail'}")
+        manifest = getattr(stmt, "manifest", None)
+        cols = [c.name for c in (getattr(getattr(manifest, "schema", None), "columns", None) or [])]
+        result = getattr(stmt, "result", None)
+        rows = list(getattr(result, "data_array", None) or [])
+        max_rows = max(1, int(os.getenv("SQL_MAX_ROWS", "100")))     # how many result rows the LLM sees
+        more = (len(rows) > max_rows or bool(getattr(manifest, "truncated", False))
+                or getattr(result, "next_chunk_index", None) is not None)
+        text = _table_to_text(cols, rows[:max_rows])
+        return text + ("\n... (additional rows omitted)" if more and not is_no_data(text) else "")
+
+    # --- OPTIONAL discovery capabilities (need `metric_view` + DATABRICKS_WAREHOUSE_ID; else no-op) ------
+    def _run_sql(self, sql: str, row_limit: int):
+        """Read-only statement execution on the configured warehouse; (cols, rows). Bounded + timed."""
+        wh = (os.getenv("DATABRICKS_WAREHOUSE_ID") or "").strip()
+        if not wh:
+            raise RuntimeError("DATABRICKS_WAREHOUSE_ID is not set")
+        try:                                                         # the SDK enum; a plain string when the
+            from databricks.sdk.service.sql import ExecuteStatementRequestOnWaitTimeout as _OWT   # SDK is absent
+            cancel = _OWT.CANCEL                                     # (an injected test client)
+        except ImportError:
+            cancel = "CANCEL"
+        wait = max(5, min(50, int(os.getenv("SQL_TIMEOUT_SECONDS", "30"))))   # the API allows 5..50s
+        resp = self._w.statement_execution.execute_statement(
+            statement=sql, warehouse_id=wh, wait_timeout=f"{wait}s", on_wait_timeout=cancel,
+            row_limit=row_limit)
+        state = _enum_value(getattr(getattr(resp, "status", None), "state", None))
+        if state != "SUCCEEDED":
+            raise RuntimeError(f"statement {state or 'unknown'}")
+        cols = [c.name for c in (getattr(getattr(resp.manifest, "schema", None), "columns", None) or [])]
+        return cols, list(getattr(resp.result, "data_array", None) or [])
+
+    def dimension_paths(self) -> list[str]:
+        """Every column of the declared metric view as `VIEW.COLUMN` (from DESCRIBE TABLE; cached).
+        Measures are listed too -- a value lookup on one simply errors and is skipped. Any failure, or no
+        metric_view / warehouse, -> [] (binding degrades to hand-declared dims / skills-only)."""
+        if self._dims_cache is not None:
+            return self._dims_cache
+        paths: list[str] = []
+        if self._metric_view:
+            try:
+                cols, rows = self._run_sql(f"DESCRIBE TABLE {self._metric_view}", 500)
+                idx = cols.index("col_name") if "col_name" in cols else 0
+                table = self._metric_view.split(".")[-1]
+                for r in rows:
+                    name = str((r[idx] if len(r) > idx else "") or "").strip()
+                    if name and not name.startswith("#"):
+                        paths.append(f"{table}.{name}")
+            except Exception:
+                paths = []
+        self._dims_cache = paths
+        return paths
+
+    def distinct_values(self, dim_paths, limit: int = 50) -> dict:
+        """Distinct values per `VIEW.COLUMN` path from the metric view (GROUP BY the dimension, which is how
+        a metric view is read without MEASURE()). Read-only, bounded, best-effort; identifiers validated
+        before interpolation (author config, never user input)."""
+        if not self._metric_view or not dim_paths:
+            return {}
+        limit = max(1, min(int(limit or 50), 1000))
+        ident = re.compile(r"^[A-Za-z_][\w$]*(\.[A-Za-z_][\w$]*)+$")
+        out = {}
+        for path in dim_paths:
+            p = str(path).strip()
+            if not ident.match(p):
+                continue
+            col = p.split(".")[-1]
+            try:
+                _, rows = self._run_sql(f"SELECT `{col}` FROM {self._metric_view} GROUP BY 1 LIMIT {limit}", limit)
+            except Exception:                                        # a measure column / any error: skip
+                continue
+            seen, vals = set(), []
+            for r in rows:
+                v = r[0] if r else None
+                if v is None:
+                    continue
+                s = str(v).strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    vals.append(s)
+            if vals:
+                out[p] = vals
+        return out
 
 
 def get_sql_tool(use_case: str | None = None, default: str = "mock",

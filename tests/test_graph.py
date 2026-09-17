@@ -89,7 +89,7 @@ class _Seq:
 def _mk(monkeypatch, worker, judge, max_iters=2, eval_retries=0):
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 18, "pass_score": 18, "max_iters": max_iters,
-        "eval_retries": eval_retries, "default_sql_tool": "mock"})
+        "eval_retries": eval_retries, "default_sql_tool": "mock", "loop": True})
     return build_graph("dq_qals", llm=worker, eval_llm=judge, verbose=False)
 
 
@@ -125,7 +125,7 @@ def test_refine_builds_from_best_not_latest(monkeypatch):
     # NOT the degraded A1 -- the loop must not walk downhill (#1).
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 18, "pass_score": 18, "max_iters": 2, "eval_retries": 0,
-        "default_sql_tool": "mock"})
+        "default_sql_tool": "mock", "loop": True})
     worker = _CapturingWorker("A0", "A1", "A2")
     judge = _Seq("SCORE: 16/18 - ok", "SCORE: 10/18 - worse", "SCORE: 11/18 - meh")
     g = build_graph("dq_qals", llm=worker, eval_llm=judge, verbose=False)
@@ -140,7 +140,7 @@ def test_worker_failure_on_refine_keeps_best(monkeypatch):
     # The run must NOT crash -- it keeps the already-scored best answer.
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 18, "pass_score": 18, "max_iters": 3, "eval_retries": 0,
-        "max_stall": 0, "default_sql_tool": "mock"})
+        "max_stall": 0, "default_sql_tool": "mock", "loop": True})
     worker = _RaisingJudge("A0", RuntimeError("Cortex output truncated"))   # good rev0, then fail
     judge = _Seq("SCORE: 12/18 - needs work")
     g = build_graph("dq_qals", llm=worker, eval_llm=judge, verbose=False)
@@ -154,7 +154,7 @@ def test_worker_failure_on_generate_is_fatal(monkeypatch):
     # Bug 1: a failure on the FIRST generate has nothing to fall back to -> it must propagate.
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 18, "pass_score": 18, "max_iters": 3, "eval_retries": 0,
-        "default_sql_tool": "mock"})
+        "default_sql_tool": "mock", "loop": True})
     worker = _RaisingJudge(RuntimeError("truncated on first draft"))
     g = build_graph("dq_qals", llm=worker, eval_llm=_Seq("SCORE: 12/18 - x"), verbose=False)
     with pytest.raises(RuntimeError):
@@ -166,7 +166,7 @@ def test_no_progress_stops_early(monkeypatch):
     # never beats best, and would grind to max_iters. max_stall stops it after N non-improving rounds.
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 18, "pass_score": 18, "max_iters": 5, "eval_retries": 0,
-        "max_stall": 2, "default_sql_tool": "mock"})
+        "max_stall": 2, "default_sql_tool": "mock", "loop": True})
     g = build_graph("dq_qals", llm=_Seq("SAME"), eval_llm=_Seq("SCORE: 12/18 - stuck"), verbose=False)
     f = g.invoke(initial_state("q"))
     assert f["iterations"] == 2 and f["best_score"] == 12  # stopped by stall, not max_iters (5)
@@ -201,7 +201,7 @@ def test_configurable_max_score_end_to_end(monkeypatch):
     # honors that scale, so the verdict parses (no denominator-mismatch fallback-to-0).
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 10, "pass_score": 10, "max_iters": 2, "eval_retries": 0,
-        "default_sql_tool": "mock"})
+        "default_sql_tool": "mock", "loop": True})
     g = build_graph("dq_qals", verbose=False)        # real mock worker + judge
     f = g.invoke(initial_state("q"))
     assert f["best_score"] == 10
@@ -266,7 +266,7 @@ def test_b2_empty_judge_reply_retries_then_falls_back(monkeypatch):
     # max_iters=0 -> evaluate runs EXACTLY once, so judge.i counts within-evaluation attempts only
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 1,
-        "default_sql_tool": "mock"})
+        "default_sql_tool": "mock", "loop": True})
     judge = _RaisingJudge(EmptyResponseError("blank"))    # always empty
     g = build_graph("dq_qals", llm=_Seq("A0"), eval_llm=judge, verbose=False)
     f = g.invoke(initial_state("q"))                       # must NOT abort the run
@@ -280,7 +280,7 @@ def test_b2_evaluator_recovers_after_empty_then_valid(monkeypatch):
     # max_iters=0 -> a single evaluate; reaching 18 proves the 2nd attempt (retry) both ran and was used
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 1,
-        "default_sql_tool": "mock"})
+        "default_sql_tool": "mock", "loop": True})
     judge = _RaisingJudge(EmptyResponseError("blank"), "SCORE: 18/18 - ok")  # empty, then valid
     g = build_graph("dq_qals", llm=_Seq("A0"), eval_llm=judge, verbose=False)
     f = g.invoke(initial_state("q"))
@@ -294,7 +294,7 @@ def test_nb2_config_error_propagates_not_silently_zero(monkeypatch):
     # unusable verdict -- it must propagate, NOT be retried into a fallback score of 0.
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: {
         "max_score": 18, "pass_score": 18, "max_iters": 1, "eval_retries": 1,
-        "default_sql_tool": "mock"})
+        "default_sql_tool": "mock", "loop": True})
     judge = _RaisingJudge(ValueError("invalid literal for int(): 'abc'"))  # config error, not empty
     g = build_graph("dq_qals", llm=_Seq("A0"), eval_llm=judge, verbose=False)
     with pytest.raises(ValueError):

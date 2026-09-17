@@ -76,8 +76,16 @@ Adding an agent = adding a folder.
 against the rubric, improve it, repeat until it's good enough. That's the whole agent.
 *Example run:* draft scores 12/18 → refine → 14 → 16 → 18, stop.
 
+**Loop flag (`loop: true`)** — the per-pack switch that turns the evaluate→refine loop ON. It is
+**off by default**: without it the run is *worker-only* — framing, retrieval (even a planned
+multi-step DAG) and the no-data escalation still happen, but the worker's answer is final and
+**unscored** (`score: None`, `status: ok`). Every shipped pack sets it. If it's on but no judge can be
+built, the run warns and continues worker-only rather than failing.
+
 **Worker vs. evaluator (judge)** — the worker AI writes the answer; the evaluator AI
 grades it. We allow them to be different models so a model isn't grading its own work.
+A third, optional role — the **planner** — emits the plan in `tool_mode: planned` packs (a faster
+model is fine there; unset = the worker plans).
 
 **Rubric** — the scorecard (out of 18) the judge uses to decide if an answer is good.
 *Example (dq_qals):* rule correctness /6 · evidence & quantification /6 · actionability /6.

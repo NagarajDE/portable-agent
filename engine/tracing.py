@@ -309,8 +309,12 @@ def traced_invoke(graph, state: dict, use_case: str) -> dict:
             pass
         raise
     try:
-        get_tracer(run_id, use_case).event("run_end", best_score=out.get("best_score"),
-                                           iterations=out.get("iterations"))
+        bs = out.get("best_score")
+        # `scored` separates the two unscored shapes a dashboard sees: escalated (status set) vs a pack
+        # that runs NON-LOOP by design (status "" and no judge) -- both carry best_score -1.
+        get_tracer(run_id, use_case).event("run_end", best_score=bs, iterations=out.get("iterations"),
+                                           scored=isinstance(bs, int) and bs >= 0,
+                                           status=out.get("status") or "ok")
     except Exception:
         pass
     try:

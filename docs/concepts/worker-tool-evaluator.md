@@ -63,6 +63,20 @@ no data step, so `grounded` is always true and nothing can escalate as `no_data`
 
 For AI+BI, **the worker does not generate the SQL** — Cortex Analyst (or Genie) does. Which one runs
 is set by `SQL_TOOL` / the pack's `semantic_layer.yaml`, independent of the worker/evaluator provider.
+Both are wired: `SQL_TOOL=cortex` (Snowflake; `snowflake:` block) and `SQL_TOOL=genie` (Databricks;
+`databricks: {genie_space, metric_view}` block) behave identically from the loop's point of view —
+same grounding, same `NO_DATA` sentinel, same read-only backstop, same `last_sql` capture for term→value
+binding.
+
+---
+
+## 2b. Two actors, not three: the non-loop mode
+
+The **evaluator is optional per pack**. Without `loop: true` in `config.yaml` the run is
+`generate → END`: the worker frames, the middle node gathers (single SQL, deterministic sweep, agentic,
+or a planned multi-step DAG), the worker synthesizes — and that answer is final, **unscored**. Nothing
+about the middle node changes; only the grader and the refine rounds are absent. Details and the
+unscored-output contract: [`the-refine-loop.md` §0](the-refine-loop.md#0-the-loop-is-opt-in-per-pack-loop-true--the-default-is-worker-only).
 
 ---
 

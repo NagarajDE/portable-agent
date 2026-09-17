@@ -29,7 +29,8 @@ an adapter (`engine/llm_client.py` / `engine/sql_tool.py`) or a use-case pack.
 
 ```
 engine/     GENERIC. shared code. touch rarely.
-  graph.py             COMPOSITION ROOT: validate config → build deps → wire the graph (State, build_graph)
+  graph.py             COMPOSITION ROOT: validate config → build deps → wire the graph (State, build_graph);
+                       `loop: true` wires evaluate/refine, else generate → END (worker-only, unscored)
   nodes.py             the loop's nodes (generate·evaluate·refine + routers) as functions of a Runtime
   retrieval.py         ONE typed Retrieval + Retriever strategies (sql|deterministic|agentic|planned|toolless)
   config.py            PackConfig — typed, closed (extra=forbid), bounded pack config
@@ -190,7 +191,9 @@ WORKER_PROVIDER=anthropic   SQL_TOOL=mock     python run_local.py <use_case>
 ```
 
 Worker and evaluator are selected **independently**, each by a provider + model, so
-you can run a different model under the same provider or two different providers.
+you can run a different model under the same provider or two different providers. (The evaluator
+only runs for packs with `loop: true`; a third optional role, the planner — `PLANNER_PROVIDER` /
+`PLANNER_MODEL` or pack `models.planner` — serves `tool_mode: planned` packs, else the worker plans.)
 `auto` (or unset) = the sensible default:
 
 |        | provider            | model        | `auto`/unset resolves to |
@@ -299,8 +302,16 @@ deletion-by-request is a plain `DELETE`.
   (LiteLLM Proxy / Databricks AI Gateway). `litellm` is lazy-imported (mock path unaffected). Prefer
   it for all non-Cortex models; `DatabricksClient` is superseded (back-compat only). See
   `docs/concepts/ai-gateway.md`.
-- **Genie is STILL STUBBED**: `GenieTool` has the SDK shape + a `TODO`. Wire like Cortex, and test
-  with `SQL_TOOL=mock` first to isolate the LLM path from the SQL path.
+- **Genie is WIRED** (Databricks): `GenieTool` (`SQL_TOOL=genie`) mirrors `CortexAnalystTool` — one
+  stateless question per call via the Genie Conversation API (`databricks-sdk`, lazy; memoized
+  `databricks_workspace_client()` = unified auth, the analog of `snowpark_session()`), the generated SQL
+  is captured as `last_sql` and passed through `_ensure_read_only()`, Genie's own query result is the
+  evidence (`SQL_MAX_ROWS` cap + visible 'omitted' note), zero rows / a clarification → the `NO_DATA`
+  sentinel. The pack declares `databricks: {genie_space: <id>, metric_view: <c.s.mv>}` in
+  `semantic_layer.yaml` — `genie_space` is REQUIRED (Genie is addressed by space; a metric view alone is
+  not callable), `metric_view` is optional and, with `DATABRICKS_WAREHOUSE_ID`, enables the same
+  `dimension_paths()` / `distinct_values()` binding capabilities as Cortex (DESCRIBE TABLE + GROUP BY).
+  Unit-tested against a fake SDK client (the `client=` seam); **the live call is untested here.**
 
 ## Deploying on Databricks
 
@@ -366,6 +377,31 @@ in sync with `git status`.
 
 ## Conventions for this codebase specifically
 
+- **The loop is OPT-IN per pack: `loop: true` (default OFF = NON-LOOP).** Missing / null / blank /
+  false → `generate → END`: framing, retrieval (single SQL, deterministic sweep, agentic, **planned
+  multi-step**), reformulate-and-retry and the no-data escalation ALL still run; only the judge and
+  refine are removed and the answer is UNSCORED (`best_score` stays -1 → surfaces report `score=None`
+  with `status=ok`; the `run_end` event carries `scored`). `loop: true` with no buildable evaluator →
+  `RuntimeWarning` + non-loop, never a failed build (an evaluator inheriting the worker is configured,
+  not missing). `shared/config.yaml` deliberately does NOT set it; every shipped pack and `_TEMPLATE`
+  set `loop: true` (a test enforces this). Don't put `loop: true` in shared; don't make the default
+  loop; don't route a non-loop run through `evaluate`. The unscored-output contract (`status` = usable
+  vs escalated, `score` = judged or not, two independent axes) is documented in
+  `docs/concepts/the-refine-loop.md` §0 — keep both surfaces on it.
+- **Planner budget + planner model (planned mode).** The plan call passes its OWN output cap
+  (`PLAN_MAX_TOKENS`, default 8192, never below `LLM_MAX_TOKENS`) via `complete(prompt, max_tokens=…)` —
+  every adapter honors a per-call override; a truncated plan escalates with an ACTIONABLE reason naming
+  `PLAN_MAX_TOKENS`. An optional third role, `models.planner` / `PLANNER_PROVIDER`+`PLANNER_MODEL`
+  (`get_planner_client`, same env > pack > default precedence and M6 rule), emits the DAG; unset = the
+  worker plans. Don't raise the general cap to fix plan truncation, and don't add a fourth role without
+  a seam like this one.
+- **Remote MCP (`url:`) is allowlisted, https-only, env-token-only.** `type: mcp` takes exactly one of
+  `command` (stdio) or `url` (Streamable HTTP; `transport: sse` for legacy); a remote host must be in the
+  tool's `allow_hosts` (else `MCP_ALLOWED_HOSTS`; empty = deny), must not resolve to a private address
+  (re-checked before each connect), and the bearer token is the env var NAMED by `token_env`. Arguments
+  are validated against the server's `list_tools` `inputSchema` (cached per tool) before `call_tool`,
+  with value-free messages; non-text blocks surface as labeled markers. Misconfiguration fails at
+  build time. All of it still rides `dispatch()`.
 - **The core's shape (post-redesign; see `docs/design/target-design.md`).** `graph.py` is ONLY a
   composition root; nodes live in `nodes.py` as functions of an explicit `Runtime` (add a dependency to
   `Runtime`, never a closure). Retrieval is ONE abstraction: a `Retriever` strategy returning a typed

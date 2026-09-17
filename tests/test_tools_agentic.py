@@ -112,7 +112,7 @@ class _MarkerWorker:
 
 def test_agentic_end_to_end_feeds_evidence_into_generate(monkeypatch):
     cfg = {"max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 0, "max_stall": 0,
-           "default_sql_tool": "mock", "tool_mode": "agentic", "max_tool_steps": 3,
+           "default_sql_tool": "mock", "loop": True, "tool_mode": "agentic", "max_tool_steps": 3,
            "tools": [{"type": "mock", "name": "catalog",
                       "input": {"query": "${task}"}, "params": {"output": "CATALOG_ROWS"}}]}
     monkeypatch.setattr(G, "load_config", lambda uc: dict(cfg))

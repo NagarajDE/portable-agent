@@ -19,3 +19,7 @@ frame_skills: [dimension_map.md]
 # Reactive value recovery: if a query comes back EMPTY, look up the real ProductType values and re-ask with
 # the exact stored spelling (e.g. "instruments" -> "Instrument") (Cortex only; no-op on mock).
 recover_value_dims: [ "INVENTORY.PRODUCT_TYPE" ]
+
+# The evaluate->refine loop is OPT-IN (missing/false = the worker's answer is final, UNSCORED). This pack keeps
+# scoring + refining (an evaluator is configured, or inherits the worker on mock).
+loop: true

@@ -112,14 +112,33 @@ tools:
 max_plan_steps: 8        # cap ~20; also the dispatch budget
 max_replans: 2           # cap ~5
 plan_skills: [ ... ]     # OPTIONAL: the decomposition guidance the PLANNER sees (keeps the plan prompt lean)
+models:
+  planner: { provider: cortex, model: "claude-haiku-4-5" }   # OPTIONAL: a faster model for the plan call
 ```
 
 Prompts (shared, pack-overridable by file presence): `shared/prompts/plan.md`, `shared/prompts/replan.md`.
 Synthesis reuses the pack's normal `generate.md`.
 
+**The planner's token budget (`PLAN_MAX_TOKENS`, default 8192).** A DAG is one large structured
+generation, and live planned runs failed with `output truncated (hit max_tokens)` under the general
+`LLM_MAX_TOKENS` cap (4096). The plan call therefore asks for its **own** cap — `PLAN_MAX_TOKENS`, never
+below `LLM_MAX_TOKENS` — passed per call (`complete(prompt, max_tokens=…)`; every adapter honors it, the
+other calls are unchanged). A cap is a ceiling, not a spend. If a plan still truncates, the run
+escalates with an actionable reason (`planner output truncated at N tokens; raise PLAN_MAX_TOKENS, trim
+plan_skills, or lower max_plan_steps`) instead of the generic message.
+
+**Plan-generation latency.** The plan is on the critical path and is a *schema-following* task, not a
+reasoning one — so the cheapest lever is a **separate, faster planner model**: `models.planner` (or
+`PLANNER_PROVIDER` / `PLANNER_MODEL`; env wins, same M6 rule as the other roles). Unset, the worker
+plans (zero behavior change). The other levers, in order: keep `plan_skills` to the decomposition
+guidance only (the planner should not see answer-side skills), lower `max_plan_steps` for packs with a
+known short shape, and keep the tool catalog small (each declared tool adds to the prompt).
+
 Per-step **tracing** (auditability is the point of a plan): `run_planned` emits `plan_created`,
 `plan_step{id,tool,status,ms}`, `replan{n}`, and `replan_failed{reason}` events via `engine/tracing.py`
 (fail-safe, no-op when `TRACER=none`), joined to the run's `generate/evaluate/refine` events by `run_id`.
+A planned pack without `loop: true` emits the same plan events; only the `evaluate`/`refine` events are
+absent and `run_end` carries `scored: false` (see [`the-refine-loop.md` §0](the-refine-loop.md)).
 
 **Reference hand-off (`max_ref_chars`, default 2000):** each `{{sN}}` is a bounded summary; a top-N list
 of ids fits comfortably, and if the bound ever bites it truncates **visibly** (`…(+N chars truncated)`)

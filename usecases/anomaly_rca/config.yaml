@@ -3,3 +3,7 @@ name: "Anomaly root-cause investigation"
 sample_task: "Orders dropped 30% yesterday — why?"
 # Skill-informed query framing (opt-in, fail-safe); falls back to the raw question on any drift.
 frame_query: true
+
+# The evaluate->refine loop is OPT-IN (missing/false = the worker's answer is final, UNSCORED). This pack keeps
+# scoring + refining (an evaluator is configured, or inherits the worker on mock).
+loop: true

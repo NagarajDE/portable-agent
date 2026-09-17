@@ -18,6 +18,15 @@ from engine.tools.base import strict_bool
 ToolMode = Literal["deterministic", "agentic", "planned"]
 
 
+def loop_flag(value) -> bool:
+    """The pack-level `loop:` switch. Missing / null / blank / false -> NON-LOOP (the default): the
+    worker's answer is final, no judge, no refine. Only a truthy value turns the evaluate->refine loop on.
+    Strict beyond that (a typo like `loop: maybe` is an error, never a guess)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return False
+    return strict_bool(value, False)
+
+
 class PackConfig(BaseModel):
     """Validated, bounded pack config. Build with `PackConfig.from_dict(load_config(pack))`."""
     model_config = ConfigDict(extra="forbid")
@@ -27,6 +36,12 @@ class PackConfig(BaseModel):
     description: str = ""
     sample_task: str = ""
     sample_questions: list[str] | None = None
+
+    # loop on/off (R1): DEFAULT OFF. `loop: true` runs generate -> evaluate -> refine; otherwise the run is
+    # generate -> END (gathering, framing, grounding and escalation still happen; only the judge and refine
+    # are removed and the answer is UNSCORED). A truthy flag with no buildable evaluator falls back to
+    # non-loop with a warning (see engine/graph.py).
+    loop: bool = False
 
     # scoring / loop bounds
     max_score: StrictInt = Field(18, ge=1)            # the rubric's authored total (denominator)
@@ -75,6 +90,8 @@ class PackConfig(BaseModel):
             for k in ("zero_is_no_data", "frame_query", "allow_runtime_instructions"):
                 if k in data:
                     data[k] = strict_bool(data[k], False)   # raises on a typo like "maybe"
+            if "loop" in data:
+                data["loop"] = loop_flag(data["loop"])       # null / "" -> off; "maybe" -> error
         return data
 
     @field_validator("tool_mode", mode="before")

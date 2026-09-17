@@ -211,7 +211,7 @@ def test_loaders_read_folders_live_not_hardcoded(tmp_path, monkeypatch):
     (pk / "exemplars").mkdir()
     (pk / "config.yaml").write_text(
         "name: synthetic\nsample_task: hello\nmax_score: 18\npass_score: 18\n"
-        "max_iters: 1\neval_retries: 0\nmax_stall: 0\n")
+        "max_iters: 1\neval_retries: 0\nmax_stall: 0\nloop: true\n")
     (pk / "skills" / "s.md").write_text(f"unique skill sentinel {sk} lives in this pack folder")
     (pk / "prompts" / "generate.md").write_text(
         f"PERSONA {gen_s}.\nSKILLS:\n{{skills}}\nEXAMPLES:\n{{exemplars}}\n"

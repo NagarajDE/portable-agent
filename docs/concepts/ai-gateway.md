@@ -34,14 +34,18 @@ Provider API keys come from the standard env vars LiteLLM reads (`ANTHROPIC_API_
 models:
   worker:    { provider: litellm, model: "anthropic/claude-sonnet-4-5" }
   evaluator: { provider: litellm, model: "openai/gpt-4o" }
+  planner:   { provider: litellm, model: "anthropic/claude-haiku-4-5" }   # OPTIONAL, planned packs only
 ```
 Or via env (wins over pack config, preserving the one-env-var migration flip):
 ```bash
 WORKER_PROVIDER=litellm  WORKER_MODEL=anthropic/claude-sonnet-4-5  python run_local.py <pack>
 LITELLM_BASE_URL=http://localhost:4000   # optional: point at a proxy / Databricks AI Gateway
 ```
-**Precedence:** env (`WORKER_PROVIDER`/`WORKER_MODEL` …) > pack `models:` > built-in default.
-Secrets/base-url stay in **env**; a pack declares only non-secret `provider + model`.
+**Precedence:** env (`WORKER_PROVIDER`/`WORKER_MODEL`, `EVAL_*`, `PLANNER_*`) > pack `models:` >
+built-in default. Three roles: the **worker** (frames, synthesizes, refines), the **evaluator** (judges;
+only used when the pack sets `loop: true`), and the optional **planner** (`tool_mode: planned` only —
+the structured plan call; unset = the worker plans). Secrets/base-url stay in **env**; a pack declares
+only non-secret `provider + model`.
 
 ## The one exception: Cortex stays native
 `CortexClient` keeps its own adapter — it authenticates via a Snowpark session **shared with

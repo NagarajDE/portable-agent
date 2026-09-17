@@ -226,12 +226,32 @@ def _render_plan_prompt(tmpl, task, catalog, skills, max_steps, results="", fail
 _REPAIR = ("\n\nYOUR PREVIOUS PLAN WAS INVALID: {diag}\nReturn ONE corrected JSON object of the form "
            '{{"steps": [ ... ]}} and nothing else.')
 
+# The planner's OUTPUT budget. A DAG is one large structured generation (every step's intent + input +
+# deps, plus any preamble a model adds), and live planned runs hit the general LLM_MAX_TOKENS cap and
+# failed. So the plan call asks for its OWN cap: PLAN_MAX_TOKENS (default 8192), never below the general
+# cap. A cap is a ceiling, not a spend -- a short plan costs the same tokens either way.
+_PLAN_MAX_TOKENS_DEFAULT = 8192
+
+
+def _plan_budget() -> int:
+    try:
+        general = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+        plan = int(os.getenv("PLAN_MAX_TOKENS", str(_PLAN_MAX_TOKENS_DEFAULT)))
+    except ValueError:
+        raise ValueError("LLM_MAX_TOKENS / PLAN_MAX_TOKENS must be positive integers")
+    return max(1, general, plan)
+
 
 def _ask_once(llm, tmpl, allowed, max_steps, render, repair="",
               known_ids=frozenset()) -> tuple[Plan | None, str]:
+    budget = _plan_budget()
     try:
-        raw = llm.complete(_render_plan_prompt(tmpl, max_steps=max_steps, repair=repair, **render))
+        raw = llm.complete(_render_plan_prompt(tmpl, max_steps=max_steps, repair=repair, **render),
+                           max_tokens=budget)
     except Exception as e:                              # a planner call failure is not fatal here
+        if "truncated" in str(e).lower():               # make the fix ACTIONABLE: name the planner's own knob
+            return None, (f"planner output truncated at {budget} tokens; raise PLAN_MAX_TOKENS, trim "
+                          f"plan_skills, or lower max_plan_steps")
         return None, f"planner call failed: {e}"
     try:
         return parse_plan(raw, allowed, max_steps, known_ids), ""

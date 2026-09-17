@@ -180,8 +180,9 @@ Real cost of a new agent: one persona paragraph + its own tuning.
 | Component | Status |
 |---|---|
 | Engine loop (LangGraph, generate→evaluate→refine, /18) | ✅ built, runs on mock |
-| LLM adapters: mock ✅ · cortex ✅ · anthropic/databricks | ✅ mock; ✅ **Cortex wired** (COMPLETE, SPCS OAuth token + local fallback); anthropic/databricks stubbed |
-| SQL-tool adapters: mock ✅ · cortex-analyst ✅ · genie | ✅ mock; ✅ **Cortex Analyst wired** (REST → runs generated SQL); genie stubbed |
+| LLM adapters: mock ✅ · cortex ✅ · anthropic ✅ · databricks ✅ · litellm ✅ | ✅ mock; ✅ **Cortex wired** (COMPLETE, SPCS OAuth token + local fallback); anthropic / databricks (explicit model) / litellm gateway wired |
+| SQL-tool adapters: mock ✅ · cortex-analyst ✅ · genie ✅ | ✅ mock; ✅ **Cortex Analyst wired** (REST → runs generated SQL); ✅ **Genie wired** (Conversation API → SQL captured + read-only checked → query result; mirrors Cortex; unit-tested on a fake SDK, awaiting first live run) |
+| Loop on/off per pack (`loop: true`) | ✅ default NON-LOOP (worker answer final, unscored: `score=None`, `status=ok`); all shipped packs set `loop: true`; flag without a buildable judge → warning + non-loop |
 | Shared tier (rubric, refine, reporting + sql_safety skills) | ✅ built |
 | Use-case packs | ✅ `dq_qals`, `kpi_analytics`, `anomaly_rca`, `parity_hana_snowflake` |
 | Exemplars (verified Q→SQL) + golden eval sets per pack | ✅ built, `run_evals.py` green (2/2 each) |
@@ -222,7 +223,7 @@ Same engine every time; only the `platform_<name>/` shell changes.
 - **Semantic-layer portability** — rebuilt per platform, by design. Not abstracted here.
 - **Cortex adapters are WIRED** (COMPLETE + Analyst REST, SPCS OAuth token / local fallback)
   but the live call is **untested from here** (no Snowflake account); needs a real semantic
-  model + Cortex/data grants. **Databricks/Genie adapters remain stubbed.**
+  model + Cortex/data grants. **Databricks/Genie adapters are wired**; Genie awaits its first live run.
 - **`spec.yaml` image path** — per-account placeholder; filled from `SHOW IMAGE REPOSITORIES`.
 - **Databricks catalog/schema names** — filled per workspace.
 
@@ -235,7 +236,7 @@ Same engine every time; only the `platform_<name>/` shell changes.
 | Extract real Cortex verified queries → `exemplars/*.yaml` | Converts today's Snowflake-pooled tuning into portable git assets |
 | Finish live Cortex verification: end-to-end Analyst run + align `inventory_balance` exemplar SQL to the real view's columns | COMPLETE + PAT auth confirmed from the user's terminal (§12.16); the Analyst answer against the real view still needs a clean pass. **Rotate the PAT** (it appeared in transcript). |
 | Add a non-BI / tool-less pack + optional tool-less mode in `graph.py` (skip `sql.ask` when a pack declares no tool) | Proves the "no semantic layer needed" path (Decision #18); `generate` currently always calls the SQL tool |
-| Wire the Databricks/Genie adapters (mirror the Cortex wiring) | The other primary platform still runs on mock only |
+| Live-verify `SQL_TOOL=genie` on a Databricks pack (adapter wired, unit-tested on a fake SDK) | The other primary platform's text-to-SQL path needs its first real run |
 | Add Streamlit-in-Snowflake chat UI | Gives the SPCS path a "looks like Genie" front end |
 | Sync the GitHub remote | Remote lagged the local build (missing CLAUDE.md, 2 packs, platform_snowflake, etc.) |
 | (If portability becomes board-level) neutral semantic layer via dbt/OSI | The only real lever for cross-platform semantic reuse |
@@ -482,7 +483,9 @@ untouched, honoring the "vendor SDK only inside the adapter" rule.
   Analyst replies (no SQL) return the analyst's text instead of crashing, missing-token
   raises a clear actionable error. **Untested against a live account** (none available here);
   row-formatter + auth-error paths unit-tested, mock regression green.
-- **Databricks/Genie:** still stubbed — wire the same way (mirror this).
+- **Databricks/Genie:** wired the same way (`GenieTool` mirrors this: `genie_space` from the pack's
+  `semantic_layer.yaml`, SQL captured + `_ensure_read_only`, Genie's query result as the rows, zero
+  rows / clarification → `NO_DATA`; optional `metric_view` + `DATABRICKS_WAREHOUSE_ID` for value binding).
 
 ### 12.9 Memory — the episodic + feedback flywheel (implemented)
 

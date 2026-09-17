@@ -16,6 +16,51 @@ This explains the generate→evaluate→refine loop in [`engine/graph.py`](../..
 
 ---
 
+## 0. The loop is OPT-IN per pack (`loop: true`) — the default is worker-only
+
+The evaluate→refine loop is **not** on by default. A pack turns it on with one key in its `config.yaml`:
+
+```yaml
+loop: true      # missing / null / blank / false  ->  NON-LOOP (the default)
+```
+
+| | **non-loop** (default) | **`loop: true`** |
+|---|---|---|
+| graph | `generate → END` | `generate → evaluate → refine → …` |
+| what still runs | framing, retrieval (**including** deterministic / agentic / **planned multi-step** gathering), reformulate-and-retry, the no-data escalation | the same, plus the judge and refine |
+| what is removed | the judge and refine | — |
+| result | the worker's first answer is final, **unscored** | the best-scoring revision, scored |
+| when to use | a real worker but no independent judge, a cheap/fast agent, a step in a bigger pipeline that scores elsewhere | quality matters and you have an evaluator model |
+
+Non-loop is **not** "single-shot only": a `tool_mode: planned` pack still plans, executes and replans its
+DAG — it just hands the synthesized answer straight back instead of grading it. And grounding is
+untouched: a blank retrieval still escalates as `no_data` / `out_of_scope` (that is deterministic, never
+the judge's job).
+
+**`loop: true` but no evaluator can be built** (a model-required provider with no model, an unknown
+provider, a missing SDK or credential) → the build **warns** (`RuntimeWarning` + a `[loop] WARNING` log
+line) and runs non-loop. It never fails. An evaluator that merely inherits the worker's provider/model
+is configured by inheritance, not missing. All shipped packs set `loop: true`, so they behave exactly as
+before; `shared/config.yaml` deliberately does not set it.
+
+### The unscored-output contract (what a surface/UI renders)
+
+`status` and `score` are two independent axes:
+
+| `status` | `score` | meaning | render as |
+|---|---|---|---|
+| `ok` | `int` | loop pack, judged | the answer + `score/max_score` |
+| `ok` | `None` | **non-loop pack** — final worker answer, unscored by design | the answer, no score badge |
+| `no_data` / `out_of_scope` | `None` | escalated: the run had no evidence | "needs action", never a pass |
+
+Internally `best_score` stays `-1` whenever no judge ran; the Snowflake `/invoke` response and the
+Databricks `custom_outputs` map that to `score: None`, and `run_local.py` prints `SCORE: n/a`. The
+`run_end` trace event carries `scored: true|false` + `status` so a dashboard can separate the two unscored
+shapes. `thread_id` already rides on the state, so a future conversational layer (history injected into
+`generate`) drops onto this path without changing the contract.
+
+---
+
 ## 1. The loop at a glance
 
 ```

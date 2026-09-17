@@ -28,10 +28,15 @@ usecases/<pack>/
 Copy `usecases/_TEMPLATE/` to start — it's a runnable minimal pack. See section 6.
 
 ### What each file is for
-- **config.yaml** — the knobs: `inherits: [shared]`, a human `name`, a `sample_task`, and optionally
-  `tools:`, scoring (`max_score`, `pass_score`/`threshold`), `max_iters`, `eval_retries`, `max_stall`,
-  `max_data_retries`, `zero_is_no_data`, `exclude_shared_skills:` (section 4), and `frame_query` /
-  `frame_skills` (below).
+- **config.yaml** — the knobs: `inherits: [shared]`, a human `name`, a `sample_task`, **`loop: true`**
+  (below), and optionally `tools:`, scoring (`max_score`, `pass_score`/`threshold`), `max_iters`,
+  `eval_retries`, `max_stall`, `max_data_retries`, `zero_is_no_data`, `exclude_shared_skills:`
+  (section 4), and `frame_query` / `frame_skills` (below).
+  - **`loop`** (default **off**) — `loop: true` turns on the evaluate→refine loop (scored answers). Without
+    it the run is `generate → END`: retrieval / multi-step gathering, framing, reformulation and the no-data
+    escalation all still run, but the worker's answer is final and **unscored** (`score: None`,
+    `status: ok`). `loop: true` with no buildable evaluator warns and runs non-loop. Every shipped pack
+    sets it; see [the-refine-loop.md §0](the-refine-loop.md).
   The two blank-data
   knobs:
   - **`max_data_retries`** (default `1`, max `5`, `0` = off) — how many times a **blank** retrieval may be
@@ -203,8 +208,11 @@ reads it from the pack and passes it to the live text-to-SQL tool:
 snowflake:
   view: DB.SCHEMA.MY_SEMANTIC_VIEW              # a native Semantic View
   # model_file: "@DB.SCHEMA.STAGE/model.yaml"   # OR a semantic-model YAML on a stage (view wins if both)
-databricks:                                     # optional; ready for when Genie is wired
-  metric_view: main.schema.my_metric_view       # OR  genie_space: <id>
+databricks:                                     # SQL_TOOL=genie (Databricks Genie, wired)
+  genie_space: 01ef1234abcd5678                 # REQUIRED -- Genie is addressed by space id
+  metric_view: main.schema.my_metric_view       # OPTIONAL -- the space's governed source; with
+                                                #   DATABRICKS_WAREHOUSE_ID set it also enables
+                                                #   term->value binding (DESCRIBE + distinct values)
 ```
 
 - **Presence = capability.** A file present marks the pack AI+BI-backed; the active tool picks the
@@ -232,12 +240,15 @@ one-env-var migration flip), so leave `WORKER_*`/`EVAL_*` unset for the pack's b
 ```yaml
 models:
   worker:    { provider: cortex, model: "claude-opus-5" }
-  evaluator: { provider: cortex, model: "claude-opus-4-8" }   # judge with a DIFFERENT model
+  evaluator: { provider: cortex, model: "claude-opus-4-8" }   # judge with a DIFFERENT model (loop: true)
+  # planner: { provider: cortex, model: "claude-haiku-4-5" }  # OPTIONAL, tool_mode: planned only
 ```
 Providers: `mock | cortex | databricks | litellm` (case-insensitive). `databricks` needs an explicit
 serving-endpoint model (no default); `litellm` needs a `provider/model` string. Precedence per role:
-env `WORKER_MODEL`/`EVAL_MODEL` > pack `models:` > the provider's built-in default. The AI+BI packs
-ship Cortex defaults; `WORKER_PROVIDER=mock SQL_TOOL=mock` runs any of them on fixtures.
+env `WORKER_MODEL`/`EVAL_MODEL`/`PLANNER_MODEL` > pack `models:` > the provider's built-in default. The
+evaluator is only used when the pack sets `loop: true`; the planner is only used by planned packs (unset
+= the worker plans). The AI+BI packs ship Cortex defaults; `WORKER_PROVIDER=mock SQL_TOOL=mock` runs any
+of them on fixtures.
 
 ### Business glossary (`glossary.yaml`)
 What a business term MEANS and HOW IT MAPS to the data. Two scopes, merged **by term, pack wins**:

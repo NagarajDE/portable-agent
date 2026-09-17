@@ -14,7 +14,7 @@ from engine.sql_tool import no_data
 from tests.doubles import Cap, Judge, Sql
 
 _CFG = {"max_score": 18, "pass_score": 18, "max_iters": 0, "eval_retries": 0, "max_stall": 0,
-        "default_sql_tool": "mock"}
+        "default_sql_tool": "mock", "loop": True}
 
 
 # --- binding: pure functions --------------------------------------------------------------------------

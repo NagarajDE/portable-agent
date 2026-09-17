@@ -21,3 +21,7 @@ exclude_shared_skills: [sql_safety]    # no SQL here
 models:
   worker:    { provider: databricks, model: "databricks-gpt-6-astra" }   # NATIVE adapter (DATABRICKS_HOST + DATABRICKS_TOKEN)
   evaluator: { provider: cortex,     model: "claude-opus-4-8" }
+
+# The evaluate->refine loop is OPT-IN (missing/false = the worker's answer is final, UNSCORED). This pack keeps
+# scoring + refining (an evaluator is configured, or inherits the worker on mock).
+loop: true

@@ -12,11 +12,12 @@ litellm                      # WORKER_PROVIDER=litellm, WORKER_MODEL=anthropic/.
 anthropic                    # WORKER_PROVIDER=anthropic (direct; or via litellm)
 snowflake-snowpark-python    # WORKER_PROVIDER=cortex  / SQL_TOOL=cortex  (Cortex stays native)
 openai                       # WORKER_PROVIDER=databricks (OpenAI-compatible endpoint; or use litellm)
-databricks-sdk               # SQL_TOOL=genie
+databricks-sdk               # SQL_TOOL=genie (Genie Conversation API + statement execution; unified auth)
 
-# --- OPTIONAL agentic MCP tools: install ONLY if a pack declares a `type: mcp` tool ---
-# Lazy-imported in engine/tools/mcp_tool.py (exposes an MCP stdio server's tool as a Tool). Without
-# it, non-MCP packs are unaffected; an MCP tool would construct fine but fail at first call.
+# --- OPTIONAL MCP tools: install ONLY if a pack declares a `type: mcp` tool ---
+# Lazy-imported in engine/tools/mcp_tool.py (exposes one MCP-server tool as a Tool: local stdio via
+# `command`, or a REMOTE server via `url` over Streamable HTTP / SSE). Without it, non-MCP packs are
+# unaffected; an MCP tool would construct fine but fail at first call.
 mcp
 
 # --- OPTIONAL local dev: auto-load a .env file so you don't export vars by hand ---

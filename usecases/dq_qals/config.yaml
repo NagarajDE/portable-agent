@@ -4,3 +4,7 @@ sample_task: "Any duplicate inspection lots in QALS today?"
 # Skill-informed query framing (opt-in, fail-safe). No semantic view here, so it mainly names measures;
 # falls back to the raw question on any drift.
 frame_query: true
+
+# The evaluate->refine loop is OPT-IN (missing/false = the worker's answer is final, UNSCORED). This pack keeps
+# scoring + refining (an evaluator is configured, or inherits the worker on mock).
+loop: true
