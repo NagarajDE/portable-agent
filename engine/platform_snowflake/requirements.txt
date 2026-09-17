@@ -1,14 +1,23 @@
-# Runtime deps for the SPCS container ONLY -- kept minimal and Snowflake-focused.
+# Runtime deps for the SPCS container ONLY -- kept minimal and Snowflake-focused, PINNED (==) to the
+# versions the suite was verified against (same policy as the repo-root requirements.txt).
 # (The repo-root requirements.txt lists every provider incl. Databricks/MLflow; we do
 #  NOT want those in the Snowflake image.)
-langgraph
-pyyaml
-pydantic
-fastapi
-uvicorn[standard]
-snowflake-snowpark-python        # Cortex COMPLETE + running Analyst-generated SQL
-requests                         # Cortex Analyst REST call (also pulled in by the connector)
+#
+# This file is the INTENT (direct deps). The image installs requirements.lock.txt next to it -- the FULLY
+# RESOLVED, HASHED set (every transitive pinned) -- so a cached layer can never sit on a vulnerable
+# transitive. Regenerate after any change here (the lock's header carries the exact command):
+#   uv pip compile engine/platform_snowflake/requirements.txt --python-version 3.11 \
+#       --python-platform x86_64-manylinux_2_28 --generate-hashes -o engine/platform_snowflake/requirements.lock.txt
+langgraph==1.2.11
+pyyaml==6.0.3
+pydantic==2.12.5
+fastapi==0.135.3
+uvicorn[standard]==0.44.0
+starlette==1.6.0                    # security-relevant transitive (serves the endpoint); fastapi only bounds >=0.46
+snowflake-snowpark-python==1.54.0   # Cortex COMPLETE + running Analyst-generated SQL
+requests==2.33.0                    # Cortex Analyst REST call (also pulled in by the connector); >=2.33.0: PYSEC-2026-2275
+urllib3==2.7.0                      # direct import in engine/tools/http_tool.py; >=2.7.0: PYSEC-2026-141/142
 
 # Optional observability -- uncomment ONLY if you set TRACER=otel:
-# opentelemetry-sdk
-# opentelemetry-exporter-otlp-proto-http
+# opentelemetry-sdk==1.40.0
+# opentelemetry-exporter-otlp-proto-http==1.40.0

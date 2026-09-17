@@ -15,11 +15,16 @@ from engine.tools.dispatch import ToolValidationError
 
 
 def _install_fake_mcp(monkeypatch, *, texts=(), is_error=False, tools=None, blocks=None,
-                      structured=None):
+                      structured=None, task_group=False):
     """A fake `mcp` SDK: stdio + streamable_http + sse transports, list_tools discovery (`tools` =
     {name: inputSchema}), and a CallToolResult with text (or arbitrary `blocks`) content. Records the
-    transport used and the arguments sent in `calls`."""
+    transport used and the arguments sent in `calls`. `task_group=True` mimics the real SDK's anyio task
+    groups: any error leaving a transport/session context is wrapped in an ExceptionGroup."""
     calls = {"transport": None, "url": None, "headers": None, "args": None, "list_tools": 0}
+
+    def _wrap(ev):
+        if task_group and ev is not None:
+            raise ExceptionGroup("unhandled errors in a TaskGroup (1 sub-exception)", [ev])
 
     class StdioServerParameters:
         def __init__(self, command=None, args=None):
@@ -37,7 +42,8 @@ def _install_fake_mcp(monkeypatch, *, texts=(), is_error=False, tools=None, bloc
             pass
         async def __aenter__(self):
             return self
-        async def __aexit__(self, *a):
+        async def __aexit__(self, et, ev, tb):
+            _wrap(ev)
             return False
         async def initialize(self):
             return None
@@ -55,7 +61,8 @@ def _install_fake_mcp(monkeypatch, *, texts=(), is_error=False, tools=None, bloc
             self.n = n
         async def __aenter__(self):
             return tuple(object() for _ in range(self.n))
-        async def __aexit__(self, *a):
+        async def __aexit__(self, et, ev, tb):
+            _wrap(ev)                                   # nested: session group inside the transport group
             return False
 
     def _stdio(server):
@@ -210,6 +217,45 @@ def test_validation_messages_never_echo_values():
     check_schema({"id": 1}, {"type": ["object", "null"]})                   # a type list
     check_schema(None, {"type": ["object", "null"]})
     check_schema({"anything": 1}, {})                                        # no schema -> permissive
+
+
+# --- BUG 2 (live): errors raised inside the SDK's task groups must surface as their REAL cause ----------------
+def test_validation_error_inside_task_group_is_still_kind_validation(monkeypatch):
+    calls = _install_fake_mcp(monkeypatch, texts=["ok"], tools={"get_issue": _SCHEMA}, task_group=True)
+    res = dispatch(build_tool("mcp", {"tool": "get_issue", "command": "srv", "read_only": True}), {"id": "x"},
+                   ToolContext())
+    assert not res.ok and res.error.kind == "validation"
+    assert "args.id" in res.error.message and "TaskGroup" not in res.error.message
+    assert calls["args"] is None                                         # never reached the server
+
+
+def test_tool_error_inside_task_group_shows_innermost_cause(monkeypatch):
+    _install_fake_mcp(monkeypatch, texts=["boom"], is_error=True, task_group=True)
+    res = dispatch(build_tool("mcp", {"tool": "do_thing", "command": "srv"}), {}, ToolContext(approved=True))
+    assert not res.ok and res.error.kind == "runtime"
+    assert "returned an error: boom" in res.error.message and "ExceptionGroup" not in res.error.message
+
+
+def test_unknown_tool_inside_task_group_shows_innermost_cause(monkeypatch):
+    _install_fake_mcp(monkeypatch, texts=["ok"], tools={"search": {}}, task_group=True)
+    res = dispatch(build_tool("mcp", {"tool": "nope", "command": "srv", "read_only": True}), {}, ToolContext())
+    assert not res.ok and "exposes no tool 'nope'" in res.error.message and "TaskGroup" not in res.error.message
+
+
+def test_unwrap_error_prefers_validation_then_ordinary_exceptions():
+    import asyncio
+    from engine.tools.mcp_tool import unwrap_error
+    v, r, c = ToolValidationError("args.id: bad"), RuntimeError("real"), asyncio.CancelledError()
+    nested = BaseExceptionGroup("outer", [BaseExceptionGroup("inner", [c, r]), v])   # CancelledError is a BaseException
+    assert unwrap_error(nested) is v
+    assert unwrap_error(BaseExceptionGroup("g", [c, r])) is r
+    assert unwrap_error(r) is r                                          # a plain exception passes through
+
+
+def test_missing_mcp_sdk_is_an_actionable_error(monkeypatch):
+    monkeypatch.setitem(sys.modules, "mcp", None)                        # simulate `pip install mcp` not done
+    res = dispatch(build_tool("mcp", {"tool": "t", "command": "srv", "read_only": True}), {}, ToolContext())
+    assert not res.ok and "pip install mcp" in res.error.message and "type: mcp" in res.error.message
 
 
 # --- non-text content blocks are surfaced, not dropped ----------------------------------------------------------

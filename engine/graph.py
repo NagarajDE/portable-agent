@@ -29,7 +29,7 @@ from engine.retrieval import (Retriever, SqlRetriever, DeterministicRetriever, A
 from engine.settings import settings as _settings
 from engine.sql_tool import get_sql_tool, SQLTool
 from engine.tools import load_tools, describe_tools
-from engine.tracing import instrument       # observability is applied from OUTSIDE the nodes
+from engine.tracing import instrument, guard_third_party_telemetry   # observability applied from OUTSIDE
 
 # Pack roots are bound HERE (the composition root) and passed explicitly to every loader, so a test can
 # point the whole engine at a temporary tree by patching these two names.
@@ -172,6 +172,7 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
     are dependency-injection seams (tests and runner scripts); unset -> resolved from config/env."""
     cfg = PackConfig.from_dict(load_config(use_case))          # typos and bad bounds fail HERE
     st = _settings()
+    guard_third_party_telemetry()                              # LangSmith cloud tracing: off unless allowed
 
     def log(m):
         if verbose:
@@ -215,6 +216,7 @@ def build_graph(use_case: str, llm: LLMClient | None = None,
         base_instructions=(instructions if instructions is not None
                            else load_instructions(use_case, cfg.exclude_shared_instructions)),
         verify_tool=verify_tool, tool_timeout_s=st.tool_timeout_s, log=log,
+        answer_tokens=cfg.max_output_tokens,
     )
 
     g = StateGraph(State)

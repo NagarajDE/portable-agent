@@ -229,13 +229,15 @@ _REPAIR = ("\n\nYOUR PREVIOUS PLAN WAS INVALID: {diag}\nReturn ONE corrected JSO
 # The planner's OUTPUT budget. A DAG is one large structured generation (every step's intent + input +
 # deps, plus any preamble a model adds), and live planned runs hit the general LLM_MAX_TOKENS cap and
 # failed. So the plan call asks for its OWN cap: PLAN_MAX_TOKENS (default 8192), never below the general
-# cap. A cap is a ceiling, not a spend -- a short plan costs the same tokens either way.
+# cap. A cap is a ceiling, not a spend -- a short plan costs the same tokens either way. (The SYNTHESIS
+# call that follows has its own ceiling: the general default, or the pack's `max_output_tokens`.)
 _PLAN_MAX_TOKENS_DEFAULT = 8192
 
 
 def _plan_budget() -> int:
+    from engine.llm_client import DEFAULT_MAX_TOKENS          # one source for the general default
     try:
-        general = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+        general = int(os.getenv("LLM_MAX_TOKENS", str(DEFAULT_MAX_TOKENS)))
         plan = int(os.getenv("PLAN_MAX_TOKENS", str(_PLAN_MAX_TOKENS_DEFAULT)))
     except ValueError:
         raise ValueError("LLM_MAX_TOKENS / PLAN_MAX_TOKENS must be positive integers")

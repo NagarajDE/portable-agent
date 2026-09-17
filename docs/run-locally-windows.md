@@ -22,14 +22,20 @@ From the **repo root** in PowerShell:
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1          # if blocked: Set-ExecutionPolicy -Scope Process RemoteSigned
-py -3 -m pip install langgraph pyyaml python-dotenv
+py -3 -m pip install -r requirements.lock.txt
 ```
 
-- `python-dotenv` lets `run_local.py` read a `.env` file automatically, so you don't have to
+- Install the **lock**, not the intent file: `requirements.txt` pins what we import, `requirements.lock.txt`
+  pins **every transitive** too (universal: any platform, Python ≥ 3.11). Into an *existing* environment
+  this also upgrades a transitive that an older install left behind — a real case: `starlette` (which serves
+  the HTTP endpoint) sat at a version with five advisories because `fastapi` only bounds it `>=0.46`. Don't
+  hand-pick packages. See [`docs/concepts/security-and-telemetry.md`](concepts/security-and-telemetry.md) §3.
+- `python-dotenv` (included) lets `run_local.py` read a `.env` file automatically, so you don't have to
   `set` a dozen env vars in the shell each time.
-- Provider SDKs are **lazy** — install only the one you use:
-  - Snowflake: `py -3 -m pip install snowflake-snowpark-python requests`
-  - Anthropic (handy for isolating the LLM half): `py -3 -m pip install anthropic`
+- Provider SDKs are **lazy-imported**, so an unused provider costs nothing at runtime. The default file
+  already carries Cortex/Snowpark, the LiteLLM gateway, `openai` and `databricks-sdk`. The opt-in ones —
+  direct `anthropic`, OpenTelemetry, the Databricks deploy stack — are in `requirements-optional.txt`:
+  `py -3 -m pip install -r requirements-optional.txt` (or just the one line you need).
 
 Create your `.env` (it is **git-ignored — never committed**):
 

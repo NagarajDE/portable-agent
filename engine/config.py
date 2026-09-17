@@ -50,6 +50,10 @@ class PackConfig(BaseModel):
     max_iters: StrictInt = Field(4, ge=0, le=10)      # <=10 keeps under LangGraph's recursion limit
     eval_retries: StrictInt = Field(1, ge=0)          # judge re-asks on an unparseable verdict
     max_stall: StrictInt = Field(2, ge=0)             # no-progress stop (0 = off)
+    # output-token CEILING for the answer calls (generate + refine) of THIS pack; None -> the deployment
+    # default (LLM_MAX_TOKENS, 8192). A pack whose answers are long (a multi-step synthesis listing many
+    # positions) declares it here instead of raising a global env var. A ceiling, not a spend.
+    max_output_tokens: StrictInt | None = Field(None, ge=256, le=200_000)
 
     # retrieval strategy
     tool_mode: ToolMode = "deterministic"

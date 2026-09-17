@@ -40,16 +40,46 @@ Config (usecases/<pack>/config.yaml):
 """
 from __future__ import annotations
 
+import builtins
 import json
 import os
 from urllib.parse import urlsplit
 
+from engine.deps import require as _require
 from engine.tools.base import ToolContext, ToolResult, ToolSpec, bound_output, strict_bool
 from engine.tools.dispatch import ToolValidationError
 from engine.tools.http_tool import _coerce_allow, host_of, is_host_allowed, resolves_to_blocked_ip
 from engine.tools.registry import register
 
 _TRANSPORTS = ("streamable_http", "sse")
+_GROUP = getattr(builtins, "BaseExceptionGroup", ())     # Python 3.11+; () -> isinstance is always False
+
+
+def _leaves(exc: BaseException) -> list[BaseException]:
+    """Flatten (nested) ExceptionGroups into their leaf exceptions, in order."""
+    if isinstance(exc, _GROUP):
+        out = []
+        for sub in exc.exceptions:
+            out.extend(_leaves(sub))
+        return out
+    return [exc]
+
+
+def unwrap_error(exc: BaseException) -> BaseException:
+    """The REAL cause of a failed MCP call. The SDK transports run inside anyio task groups, so ANY error
+    raised in the session body -- our own argument-validation error included -- leaves the `async with` as
+    an `ExceptionGroup: unhandled errors in a TaskGroup`, and dispatch would classify that generic wrapper
+    as `runtime`, hiding the cause. Pick the most informative leaf: a validation error first, then any
+    ordinary exception (cancellations are side-effects of the real failure), else the first leaf."""
+    leaves = _leaves(exc)
+    for leaf in leaves:
+        if isinstance(leaf, ToolValidationError):
+            return leaf
+    import asyncio
+    for leaf in leaves:
+        if isinstance(leaf, Exception) and not isinstance(leaf, asyncio.CancelledError):
+            return leaf
+    return leaves[0] if leaves else exc
 
 
 def _env_allowlist() -> list[str]:
@@ -167,7 +197,13 @@ class McpTool:
 
     def run(self, input: dict, ctx: ToolContext) -> ToolResult:
         import asyncio
-        text = asyncio.run(self._call(dict(input or {}), max(1.0, float(ctx.timeout_s))))
+        try:
+            text = asyncio.run(self._call(dict(input or {}), max(1.0, float(ctx.timeout_s))))
+        except BaseException as e:
+            leaf = unwrap_error(e)
+            if leaf is e:
+                raise
+            raise leaf from e                       # the real cause, typed -> dispatch classifies it correctly
         return ToolResult(ok=True, output=bound_output(text),
                           meta={"tool": self._tool, "transport": self._transport})
 
@@ -181,7 +217,7 @@ class McpTool:
 
     async def _call(self, arguments: dict, timeout_s: float) -> str:
         # LAZY + UNTESTED against a live server (needs the `mcp` SDK + a server).
-        from mcp import ClientSession
+        ClientSession = _require("mcp", package="mcp", feature="a `type: mcp` tool").ClientSession
         if self._command:
             import shlex
             from mcp import StdioServerParameters
@@ -214,7 +250,7 @@ class McpTool:
             text = _content_text(result)
             if getattr(result, "isError", False):          # H3: a tool-level error is NOT success;
                 raise RuntimeError(                         # raise -> dispatch normalizes to ok=False
-                    f"MCP tool {self._tool!r} returned an error: {text or result!r}")
+                    f"MCP tool {self._tool!r} returned an error: {text or repr(result)}")
             return text or str(result)
 
     async def _validate_args(self, session, arguments: dict) -> None:

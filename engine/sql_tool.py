@@ -130,6 +130,20 @@ def _blank_strings_and_comments(sql: str) -> str:
     return "".join(out)
 
 
+# A pack-declared object name that is INTERPOLATED into SQL (a semantic view, a metric view). Pack config is
+# operator-trusted, but a name is a name: dotted segments of identifier characters, or "quoted" segments --
+# never a statement fragment. Validated at construction, so a typo or an injected `; DROP` fails at build.
+_SQL_OBJECT_NAME = re.compile(r'^(?:[A-Za-z_][\w$]*|"[^"]+")(?:\.(?:[A-Za-z_][\w$]*|"[^"]+"))*$')
+
+
+def _sql_object_name(name: str, what: str) -> str:
+    n = (name or "").strip()
+    if not _SQL_OBJECT_NAME.match(n):
+        raise ValueError(f"{what} must be a dotted object name like DB.SCHEMA.NAME (segments may be "
+                         f"\"quoted\"); got {n!r}")
+    return n
+
+
 def _ensure_read_only(sql: str) -> str:
     """Defense-in-depth HEURISTIC, not a security boundary: reject obvious writes and
     multi-statement SQL from the model. The REAL control is granting the service role
@@ -166,6 +180,7 @@ class CortexAnalystTool:
         view = str((semantic or {}).get("view", "")).strip()         # DB.SCHEMA.MY_SEMANTIC_VIEW
         model = str((semantic or {}).get("model_file", "")).strip()  # @db.schema.stage/model.yaml
         if view:
+            view = _sql_object_name(view, "semantic_layer.yaml snowflake.view")   # it is interpolated into SQL
             self._semantic = {"semantic_view": view}
         elif model:
             self._semantic = {"semantic_model_file": model}
@@ -296,6 +311,8 @@ class GenieTool:
     def __init__(self, semantic: dict | None = None, client=None):   # semantic: the pack's `databricks:` block
         space = str((semantic or {}).get("genie_space", "")).strip()
         self._metric_view = str((semantic or {}).get("metric_view", "")).strip()
+        if self._metric_view:                                        # it is interpolated into SQL
+            self._metric_view = _sql_object_name(self._metric_view, "semantic_layer.yaml databricks.metric_view")
         if not space:                                                # config check FIRST (before any SDK)
             raise KeyError("Genie pack declares no Genie space: the `databricks:` block in the pack's "
                            "semantic_layer.yaml needs `genie_space: <space id>` (Genie is called by space; "

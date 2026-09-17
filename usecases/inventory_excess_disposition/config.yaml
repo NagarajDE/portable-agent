@@ -31,6 +31,10 @@ models:
   # cheapest latency lever (unset = the worker plans). The plan call also uses its own token budget
   # (PLAN_MAX_TOKENS, default 8192) so a full DAG never truncates under the general LLM_MAX_TOKENS cap.
   # planner: { provider: cortex, model: "claude-haiku-4-5" }
+# The SYNTHESIS over everything the steps gathered is long (one line per position + reason). The general
+# default ceiling (LLM_MAX_TOKENS=8192) covers the typical scoped question; for broad, unscoped ones
+# raise THIS pack's answer ceiling here instead of the global env var (a ceiling, not a spend).
+# max_output_tokens: 16000
 
 # The evaluate->refine loop is OPT-IN (missing/false = the worker's answer is final, UNSCORED). This pack keeps
 # scoring + refining (an evaluator is configured, or inherits the worker on mock).

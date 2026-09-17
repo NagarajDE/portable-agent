@@ -1,37 +1,59 @@
+# DEFAULT install: everything a local run needs, PINNED (==) to the versions the offline suite was
+# verified against. Opt-in adapters (direct Anthropic, OpenTelemetry, the Databricks deploy stack) live in
+# requirements-optional.txt so they are pinned and audited WITHOUT being installed by default.
+#
+# Policy (enforced by tests/test_dependency_policy.py, audited by .github/workflows/ci.yml):
+#   * DECLARE WHAT YOU IMPORT -- a module imported by engine/ or a runner script is declared here (or in
+#     requirements-optional.txt), never left to transitive resolution.
+#   * PIN WHAT YOU DECLARE -- `==` in every requirements file; shared packages pin to the SAME version.
+# Bump deliberately: `pip install -U <pkg>` -> `pytest -q` -> re-pin -> REGENERATE THE LOCK.
+#
+# This file is the INTENT (direct deps). requirements.lock.txt is the fully RESOLVED set -- every
+# transitive pinned (universal: any platform, Python >= 3.11) -- and is what to install:
+#   pip install -r requirements.lock.txt -r requirements-dev.txt
+#   uv pip compile requirements.txt --universal --python-version 3.11 -o requirements.lock.txt   # regenerate
+# tests/test_dependency_policy.py fails if the lock is stale relative to this file.
+# See docs/concepts/security-and-telemetry.md §3.
+
 # --- engine core (needed to run locally) ---
-langgraph
-pyyaml
-pydantic                     # typed, validated judge verdict (comes with langgraph too)
+langgraph==1.2.11
+pyyaml==6.0.3
+pydantic==2.12.5                # typed, validated judge verdict (comes with langgraph too)
+# `requests` + `urllib3` are DIRECT imports of engine/ -- the generic http tool (ANY platform) and the
+# Cortex Analyst REST call -- so they are declared here, not left to transitive resolution.
+requests==2.33.0                # >=2.33.0: PYSEC-2026-2275
+urllib3==2.7.0                  # imported by engine/tools/http_tool.py for its raw read-error types.
+                                # >=2.7.0: PYSEC-2026-141 (sensitive headers kept across a cross-origin
+                                # redirect) + PYSEC-2026-142. Our http tool already defends against the
+                                # first (manual redirects, token bound to the original https origin) --
+                                # this is the defense-in-depth layer under it.
 
 # --- AI gateway (recommended for all non-Cortex models): the adopted gateway, like LangGraph is
 #     the adopted loop. One adapter reaches every provider via the model string; routing/fallback
 #     live in LiteLLM (in-process SDK, or a LiteLLM Proxy / Databricks AI Gateway via LITELLM_BASE_URL).
-litellm                      # WORKER_PROVIDER=litellm, WORKER_MODEL=anthropic/... | databricks/... | openai/...
+#     Its phone-home (telemetry, GitHub price-map fetch, content logging) is pinned OFF by the adapter.
+litellm==1.101.0                # WORKER_PROVIDER=litellm, WORKER_MODEL=anthropic/... | databricks/... | openai/...
 
 # --- real providers: install only the ones you use (or just use `litellm` above) ---
-anthropic                    # WORKER_PROVIDER=anthropic (direct; or via litellm)
-snowflake-snowpark-python    # WORKER_PROVIDER=cortex  / SQL_TOOL=cortex  (Cortex stays native)
-openai                       # WORKER_PROVIDER=databricks (OpenAI-compatible endpoint; or use litellm)
-databricks-sdk               # SQL_TOOL=genie (Genie Conversation API + statement execution; unified auth)
+snowflake-snowpark-python==1.54.0   # WORKER_PROVIDER=cortex  / SQL_TOOL=cortex  (Cortex stays native)
+openai==2.54.0                  # WORKER_PROVIDER=databricks (OpenAI-compatible endpoint; or use litellm)
+databricks-sdk==0.139.0         # SQL_TOOL=genie (Genie Conversation API + statement execution; unified auth)
 
-# --- OPTIONAL MCP tools: install ONLY if a pack declares a `type: mcp` tool ---
-# Lazy-imported in engine/tools/mcp_tool.py (exposes one MCP-server tool as a Tool: local stdio via
-# `command`, or a REMOTE server via `url` over Streamable HTTP / SSE). Without it, non-MCP packs are
-# unaffected; an MCP tool would construct fine but fail at first call.
-mcp
+# --- MCP tools: needed only if a pack declares a `type: mcp` tool, but pinned + exercised here ---
+# Lazy-imported in engine/tools/mcp_tool.py (one MCP-server tool as a Tool: local stdio via `command`, or a
+# REMOTE server via `url` over Streamable HTTP / SSE). tests/test_tools_mcp_real_sdk.py runs a real FastMCP
+# stdio server through the adapter, so a bump here is exercised rather than assumed.
+mcp==1.28.1                     # >=1.28.1: PYSEC-2026-3481/3482/3483 (server-side; we use the client only)
 
 # --- OPTIONAL local dev: auto-load a .env file so you don't export vars by hand ---
-python-dotenv
+python-dotenv==1.2.2
 
-# --- OPTIONAL observability: install ONLY if you set TRACER=otel ---
-# Default TRACER=stdout needs none of these (zero-dep JSON events). Lazy-imported.
-# opentelemetry-sdk
-# opentelemetry-exporter-otlp-proto-http
-
-# --- only needed to DEPLOY on Snowflake (SPCS) ---
-fastapi
-uvicorn
-
-# --- only needed to DEPLOY on databricks ---
-mlflow
-databricks-agents
+# --- only needed to DEPLOY on Snowflake (SPCS); also used by the shell tests ---
+# The image installs engine/platform_snowflake/requirements.txt instead -- keep the shared pins EQUAL.
+fastapi==0.135.3
+uvicorn==0.44.0
+# SECURITY-RELEVANT TRANSITIVE, pinned on purpose: fastapi only bounds it `>=0.46.0`, so an existing env
+# (or a cached image layer) can sit on a vulnerable starlette (1.0.0 carried PYSEC-2026-161/248/249/2280/
+# 2281) while a fresh resolve looks clean. An explicit `==` makes `pip install -r` UPGRADE it in place.
+# The lockfiles pin every other transitive; this one also lives here because it serves the HTTP endpoint.
+starlette==1.6.0

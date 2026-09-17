@@ -1,0 +1,8 @@
+# DEV / CI tooling only -- never shipped in an image, never imported by engine/. Pinned like everything
+# else so a CI run is reproducible and the audit tooling itself can't drift under us.
+#     pip install -r requirements.txt -r requirements-dev.txt && pytest -q
+pytest==9.0.3
+httpx==0.28.1                   # fastapi.testclient (the Snowflake shell tests) needs it; also pulled in
+                                # transitively by litellm/openai/mcp -- declared so the test path is explicit
+pip-audit==2.10.1               # CI: vulnerability audit of the pinned requirement files
+cyclonedx-bom==7.4.0            # CI: CycloneDX SBOM artifact

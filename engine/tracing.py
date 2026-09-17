@@ -37,7 +37,40 @@ import json
 import time
 import logging
 import threading
+import warnings
 from typing import Callable, Protocol, runtime_checkable
+
+
+# ==========================================================================
+# THIRD-PARTY TELEMETRY GUARD -- observability we did NOT choose is off by default.
+# ==========================================================================
+# LangGraph is built on LangChain, whose callback manager turns on LangSmith cloud tracing purely from
+# the ENVIRONMENT (LANGSMITH_TRACING / LANGCHAIN_TRACING_V2 / LANGCHAIN_TRACING + an API key). If a
+# deployment inherited those vars, every prompt and answer -- including retrieved data rows -- would be
+# shipped to a third-party SaaS. We never opted into that, so the loop FORCES it off at build time unless
+# the operator explicitly allows it with ALLOW_LANGSMITH_TRACING=true. (MLflow's usage telemetry and
+# LiteLLM's phone-home are pinned off at their own adapter edges: the Databricks shell / _hardened_litellm.)
+_LANGSMITH_FLAGS = ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING")
+
+
+def _truthy(v) -> bool:
+    return (v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def guard_third_party_telemetry() -> list[str]:
+    """Force LangSmith/LangChain cloud tracing OFF unless ALLOW_LANGSMITH_TRACING=true. Returns the env
+    vars it disabled (empty when nothing was on). Warns, never raises: a deployment that inherited the
+    flag keeps serving -- without leaking content."""
+    if _truthy(os.getenv("ALLOW_LANGSMITH_TRACING")):
+        return []
+    disabled = [k for k in _LANGSMITH_FLAGS if _truthy(os.getenv(k))]
+    for k in disabled:
+        os.environ[k] = "false"
+    if disabled:
+        warnings.warn(f"third-party tracing env {disabled} was set; forced OFF (prompts/answers would leave "
+                      f"the platform). Set ALLOW_LANGSMITH_TRACING=true to permit it deliberately.",
+                      RuntimeWarning, stacklevel=2)
+    return disabled
 
 
 # ==========================================================================
@@ -146,6 +179,8 @@ class OTelTracer:
 class MLflowTracer:
     """Databricks: MLflow Tracing spans. One run == one trace; each event == a span."""
     def __init__(self, run_id: str, use_case: str):
+        os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")   # MLflow usage telemetry: off unless the
+        os.environ.setdefault("DO_NOT_TRACK", "true")               # operator opts in (read at import)
         import mlflow                                     # lazy: only when TRACER=mlflow
         self._mlflow = mlflow
         self.base = {"run_id": run_id, "use_case": use_case}

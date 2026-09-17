@@ -26,6 +26,8 @@ import importlib
 import threading
 from typing import Protocol, runtime_checkable
 
+from engine.deps import require as _require
+
 
 @runtime_checkable
 class LLMClient(Protocol):
@@ -84,24 +86,29 @@ def _next_rev(text: str) -> int:        # reads "NEXT_REVISION=N" from the instr
 # REAL ADAPTERS -- same .complete() signature. SDKs imported lazily so the
 # mock path never needs them installed. Fill the TODO, set the env var, done.
 # --------------------------------------------------------------------------
+DEFAULT_MAX_TOKENS = 8192
+_TRUNCATED_HINT = "raise LLM_MAX_TOKENS (or the pack's max_output_tokens)"
+
+
 def _max_tokens(override=None) -> int:
-    """Output token cap, CLAMPED to >= 1. Default 4096 -- ample for our short answers/one-line
-    verdicts, so truncation is unlikely; raise LLM_MAX_TOKENS if you generate longer outputs. A caller
-    may pass a PER-CALL `override` (`complete(prompt, max_tokens=N)`) for a call known to be long -- the
-    planner's DAG (engine/tools/planned.py) is the one such caller. A non-integer raises a clear error
-    here (only on the real-provider path; mock never calls this) rather than a cryptic failure deep
-    inside the provider SDK."""
+    """Output token cap, CLAMPED to >= 1. A cap is a CEILING, not a spend: a short answer costs the same
+    tokens whatever the cap, so the default is generous (8192 -- a multi-step synthesis over gathered
+    evidence, e.g. a planned pack classifying dozens of positions, overran 4096 live). Lower LLM_MAX_TOKENS
+    only for a model whose output limit is smaller. A caller may pass a PER-CALL `override`
+    (`complete(prompt, max_tokens=N)`): the planner's DAG (PLAN_MAX_TOKENS) and the answer calls of a pack
+    that declares `max_output_tokens`. A non-integer raises a clear error here (only on the real-provider
+    path; mock never calls this) rather than a cryptic failure deep inside the provider SDK."""
     if override is not None:
         return max(1, int(override))
     try:
-        return max(1, int(os.getenv("LLM_MAX_TOKENS", "4096")))
+        return max(1, int(os.getenv("LLM_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))))
     except ValueError:
         raise ValueError("LLM_MAX_TOKENS must be a positive integer")
 
 
 class AnthropicClient:
     def __init__(self, model: str | None = None):
-        import anthropic
+        anthropic = _require("anthropic", package="anthropic", feature="WORKER_PROVIDER=anthropic")
         self._c = anthropic.Anthropic(timeout=60.0, max_retries=2)   # reads ANTHROPIC_API_KEY
         self._model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 
@@ -110,7 +117,7 @@ class AnthropicClient:
             model=self._model, max_tokens=_max_tokens(kw.get("max_tokens")),
             messages=[{"role": "user", "content": prompt}])
         if r.stop_reason == "max_tokens":               # truncated: don't treat a cut-off reply as complete
-            raise RuntimeError("Anthropic output truncated (hit max_tokens); raise LLM_MAX_TOKENS")
+            raise RuntimeError(f"Anthropic output truncated (hit max_tokens); {_TRUNCATED_HINT}")
         text = "\n".join(b.text for b in r.content if b.type == "text").strip()
         if not text:                                    # don't return an empty/None answer
             raise EmptyResponseError("Anthropic returned no text content")
@@ -141,7 +148,7 @@ class CortexClient:
             text = ((obj.get("choices") or [{}])[0].get("messages") or "").strip()
             if text:
                 if (obj.get("usage") or {}).get("completion_tokens", 0) >= max_tokens:
-                    raise RuntimeError("Cortex output truncated (hit max_tokens); raise LLM_MAX_TOKENS")
+                    raise RuntimeError(f"Cortex output truncated (hit max_tokens={max_tokens}); {_TRUNCATED_HINT}")
                 return text
             # empty/unexpected shape -> fall through to the simple form below
         except RuntimeError:
@@ -154,6 +161,21 @@ class CortexClient:
         if not text or not str(text).strip():
             raise EmptyResponseError("Cortex COMPLETE returned no text")
         return text
+
+
+def _hardened_litellm():
+    """Import litellm with its phone-home / content-logging switches OFF (idempotent). LiteLLM ships
+    with `telemetry=True`, fetches its model-price map from GitHub at import (`LITELLM_LOCAL_MODEL_COST_MAP`
+    unset), and lets any registered callback receive full prompt/response text. We: (1) force the local,
+    bundled price map (the env must be set BEFORE the import -- it is read at import time), (2) turn
+    telemetry off, (3) `turn_off_message_logging` so a callback added later can never see prompt content,
+    (4) suppress the debug banner. The user-set env wins for (1) (setdefault)."""
+    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    litellm = _require("litellm", package="litellm", feature="provider litellm (the AI gateway)")
+    litellm.telemetry = False
+    litellm.turn_off_message_logging = True
+    litellm.suppress_debug_info = True
+    return litellm
 
 
 class LiteLLMClient:
@@ -171,15 +193,16 @@ class LiteLLMClient:
             raise ValueError("litellm provider needs a model string -- set WORKER_MODEL / EVAL_MODEL "
                              "(or LITELLM_MODEL), e.g. 'anthropic/claude-sonnet-4-5'")
         self._base_url = (os.getenv("LITELLM_BASE_URL") or "").strip() or None  # -> a proxy / gateway
+        self._litellm = _hardened_litellm()                 # import ONCE, with telemetry/logging pinned off
 
     def complete(self, prompt: str, **kw) -> str:
-        import litellm
+        litellm = self._litellm
         r = litellm.completion(
             model=self._model, messages=[{"role": "user", "content": prompt}],
             max_tokens=_max_tokens(kw.get("max_tokens")), api_base=self._base_url, num_retries=2, timeout=60)
         choice = r.choices[0] if getattr(r, "choices", None) else None
         if choice is not None and getattr(choice, "finish_reason", None) == "length":
-            raise RuntimeError("LiteLLM output truncated (finish_reason=length); raise LLM_MAX_TOKENS")
+            raise RuntimeError(f"LiteLLM output truncated (finish_reason=length); {_TRUNCATED_HINT}")
         msg = getattr(choice, "message", None) if choice is not None else None
         text = getattr(msg, "content", None) if msg is not None else None
         if not text or not str(text).strip():
@@ -217,7 +240,8 @@ def databricks_workspace_client():
     global _ws_client
     with _ws_lock:
         if _ws_client is None:
-            from databricks.sdk import WorkspaceClient          # lazy: only for SQL_TOOL=genie
+            WorkspaceClient = _require("databricks.sdk", package="databricks-sdk",   # lazy: SQL_TOOL=genie only
+                                       feature="SQL_TOOL=genie (Databricks Genie)").WorkspaceClient
             host = (os.getenv("DATABRICKS_HOST") or "").strip()
             _ws_client = WorkspaceClient(host=_databricks_origin(host)) if host else WorkspaceClient()
         return _ws_client
@@ -240,7 +264,8 @@ class DatabricksClient:
         if not token:
             raise RuntimeError("DATABRICKS_TOKEN is required")
         base_url = _databricks_base_url(os.getenv("DATABRICKS_HOST", ""))
-        from openai import OpenAI                       # lazy: only when this provider is selected
+        OpenAI = _require("openai", package="openai",                 # lazy: only when this provider is selected
+                          feature="WORKER_PROVIDER=databricks (native adapter)").OpenAI
         self._c = OpenAI(api_key=token, base_url=base_url, timeout=60.0, max_retries=2)
 
     def complete(self, prompt: str, **kw) -> str:
@@ -249,7 +274,7 @@ class DatabricksClient:
             messages=[{"role": "user", "content": prompt}])
         choice = r.choices[0] if r.choices else None
         if choice and choice.finish_reason == "length":  # truncated: don't treat as complete
-            raise RuntimeError("Databricks output truncated (finish_reason=length); raise LLM_MAX_TOKENS")
+            raise RuntimeError(f"Databricks output truncated (finish_reason=length); {_TRUNCATED_HINT}")
         text = choice.message.content if choice else None
         if not text or not text.strip():
             raise EmptyResponseError("Databricks endpoint returned no text content")
@@ -299,7 +324,8 @@ def _apply_secondary_roles(session):
 def _new_snowpark_session():
     """Build a Snowpark Session -- inside SPCS (injected OAuth token) or locally (a single
     SNOWFLAKE_PAT via sf_cfg -- no password). Honors SNOWFLAKE_SECONDARY_ROLES."""
-    from snowflake.snowpark import Session
+    Session = _require("snowflake.snowpark", package="snowflake-snowpark-python",
+                       feature="WORKER_PROVIDER=cortex / SQL_TOOL=cortex").Session
     if os.path.exists(_SPCS_TOKEN):
         with open(_SPCS_TOKEN) as f:
             token = f.read()

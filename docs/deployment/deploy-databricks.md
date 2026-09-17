@@ -52,7 +52,7 @@ Easiest: add this repo as a **Git folder**.
 
 **Cell 1 — install deps and restart Python:**
 ```python
-%pip install -U langgraph pyyaml pydantic openai mlflow databricks-agents databricks-sdk
+%pip install -r requirements.txt -r requirements-optional.txt   # pinned; optional adds mlflow + databricks-agents
 dbutils.library.restartPython()
 ```
 

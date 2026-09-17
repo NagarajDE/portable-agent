@@ -42,10 +42,23 @@ def _merge_models(acc: dict, incoming) -> dict:
     return out
 
 
+_PACK_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]*$")
+
+
+def check_pack_name(use_case: str) -> str:
+    """A pack name is a FOLDER name under usecases/ -- never a path. It comes from operator config (USE_CASE
+    env / the CLI), but it is joined onto the filesystem and imported as a module, so it is validated
+    anyway: identifier characters only (no separators, no `..`)."""
+    if not isinstance(use_case, str) or not _PACK_NAME.match(use_case):
+        raise ValueError(f"invalid use-case pack name {use_case!r} (letters, digits, _ and - only)")
+    return use_case
+
+
 def load_config(use_case: str, *, usecases: Path | None = None, shared: Path | None = None) -> dict:
     """Merge inherited bases (e.g. shared) then the pack's own config (pack wins). Scalars use a
     shallow last-writer-wins; the nested `models:` block is deep-merged per role. Returns the RAW dict;
     `engine.config.PackConfig` validates it."""
+    check_pack_name(use_case)
     uc, sh = _roots(usecases, shared)
     pack = yaml.safe_load((uc / use_case / "config.yaml").read_text(encoding="utf-8")) or {}
     inherits = pack.get("inherits", [])

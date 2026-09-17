@@ -52,8 +52,36 @@ def test_planner_call_carries_its_own_max_tokens():
     assert llm.kws and llm.kws[0] == {"max_tokens": 8192}           # the plan call, not the general cap
 
 
-def test_max_tokens_override_is_honored_by_the_adapters_helper():
-    assert _max_tokens(8192) == 8192 and _max_tokens() == 4096 and _max_tokens(0) == 1
+def test_max_tokens_override_is_honored_by_the_adapters_helper(monkeypatch):
+    assert _max_tokens(16000) == 16000 and _max_tokens() == 8192 and _max_tokens(0) == 1   # default now 8192
+    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
+    assert _max_tokens() == 4096 and _max_tokens(None) == 4096
+
+
+# --- the SYNTHESIS budget: the answer calls get a ceiling too (BUG 1 from live testing) --------------------
+def test_pack_max_output_tokens_reaches_generate_and_refine(monkeypatch):
+    from engine.config import PackConfig
+    monkeypatch.setattr(G, "load_config", lambda uc: {"max_score": 18, "pass_score": 18, "max_iters": 1,
+                                                       "eval_retries": 0, "max_stall": 0, "loop": True,
+                                                       "default_sql_tool": "mock", "tools": [],
+                                                       "max_output_tokens": 12000})
+    w = _KwLLM(answers=["a", "b"])
+    build_graph("dq_qals", llm=w, eval_llm=Judge("SCORE: 1/18 - low"), verbose=False).invoke(initial_state("q"))
+    assert [k.get("max_tokens") for k in w.kws] == [12000, 12000]      # generate AND refine
+    with pytest.raises(ValueError):
+        PackConfig.from_dict({"max_output_tokens": 10})                # bounded (>= 256)
+
+
+def test_without_the_knob_the_answer_calls_use_the_adapter_default(monkeypatch):
+    monkeypatch.setattr(G, "load_config", lambda uc: {"max_score": 18, "pass_score": 18, "max_iters": 0,
+                                                       "eval_retries": 0, "loop": True, "tools": []})
+    w = _KwLLM(answers=["a"])
+    build_graph("dq_qals", llm=w, eval_llm=Judge(), verbose=False).invoke(initial_state("q"))
+    assert w.kws == [{"max_tokens": None}]                             # None -> _max_tokens() -> env/8192
+
+
+def test_plan_budget_follows_the_raised_general_default():
+    assert _plan_budget() >= 8192 and _plan_budget() >= _max_tokens()
 
 
 def test_truncation_diagnostic_names_the_planner_knob():

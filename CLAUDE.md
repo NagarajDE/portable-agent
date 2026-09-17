@@ -174,7 +174,8 @@ checklist: `docs/concepts/use-case-pack-anatomy.md`.
 ## Running it
 
 ```bash
-pip install langgraph pyyaml
+pip install -r requirements.lock.txt       # the LOCK (every transitive pinned); intent = requirements.txt
+                                           # opt-in adapters: -r requirements-optional.txt
 python run_local.py                        # dq_qals by default
 python run_local.py kpi_analytics
 python run_local.py anomaly_rca
@@ -336,8 +337,9 @@ snow spcs service create dq_agent --compute-pool dq_pool --spec-path engine/plat
 Beginner step-by-step (separate from the code): `docs/deployment/deploy-snowflake.md`.
 The container was validated for real (image builds, `/healthz` 200, `/invoke` 18/18,
 JSON trace events on stdout). Notes: the image installs
-`engine/platform_snowflake/requirements.txt` (minimal Snowflake set — NOT the repo-root
-requirements), `spec.yaml` uses the SPCS `env:` **map** form (not the k8s list) and ships
+`engine/platform_snowflake/requirements.lock.txt` — the fully resolved, **hashed** lock of the minimal
+Snowflake set (`pip install --require-hashes`; NOT the repo-root requirements; regenerate from
+`requirements.txt` next to it after any change), `spec.yaml` uses the SPCS `env:` **map** form (not the k8s list) and ships
 **MOCK-first** so the first deploy works before the Cortex adapters are wired. Fill the
 `image:` path from `SHOW IMAGE REPOSITORIES`. Cortex adapters are **wired**: they use the
 OAuth token Snowflake injects at `/snowflake/session/token` (via `snowpark_session()` /
@@ -388,20 +390,60 @@ in sync with `git status`.
   loop; don't route a non-loop run through `evaluate`. The unscored-output contract (`status` = usable
   vs escalated, `score` = judged or not, two independent axes) is documented in
   `docs/concepts/the-refine-loop.md` §0 — keep both surfaces on it.
-- **Planner budget + planner model (planned mode).** The plan call passes its OWN output cap
-  (`PLAN_MAX_TOKENS`, default 8192, never below `LLM_MAX_TOKENS`) via `complete(prompt, max_tokens=…)` —
-  every adapter honors a per-call override; a truncated plan escalates with an ACTIONABLE reason naming
-  `PLAN_MAX_TOKENS`. An optional third role, `models.planner` / `PLANNER_PROVIDER`+`PLANNER_MODEL`
+- **Output-token ceilings: general 8192, plan call `PLAN_MAX_TOKENS`, pack `max_output_tokens`.** A cap
+  is a CEILING, not a spend, so `LLM_MAX_TOKENS` defaults to 8192 (`DEFAULT_MAX_TOKENS` in
+  `llm_client.py`; lower it only for a model with a smaller output limit). The plan call passes its OWN
+  cap (`PLAN_MAX_TOKENS`, default 8192, never below the general one) via `complete(prompt, max_tokens=…)`
+  — every adapter honors a per-call override; a truncated plan escalates with an ACTIONABLE reason naming
+  `PLAN_MAX_TOKENS`. A pack whose ANSWERS are long (a multi-step synthesis) declares `max_output_tokens:`
+  (PackConfig, 256..200000) which `Runtime.answer_tokens` applies to `generate` + `refine` only (the judge
+  and the short framing/reformulate calls keep the default). Optional vendor SDKs are imported through
+  `engine/deps.py:require()` so a missing package fails naming the feature + `pip install …`, never a bare
+  ModuleNotFoundError. An optional third role, `models.planner` / `PLANNER_PROVIDER`+`PLANNER_MODEL`
   (`get_planner_client`, same env > pack > default precedence and M6 rule), emits the DAG; unset = the
-  worker plans. Don't raise the general cap to fix plan truncation, and don't add a fourth role without
-  a seam like this one.
+  worker plans. Don't add a fourth role without a seam like this one.
 - **Remote MCP (`url:`) is allowlisted, https-only, env-token-only.** `type: mcp` takes exactly one of
   `command` (stdio) or `url` (Streamable HTTP; `transport: sse` for legacy); a remote host must be in the
   tool's `allow_hosts` (else `MCP_ALLOWED_HOSTS`; empty = deny), must not resolve to a private address
   (re-checked before each connect), and the bearer token is the env var NAMED by `token_env`. Arguments
   are validated against the server's `list_tools` `inputSchema` (cached per tool) before `call_tool`,
   with value-free messages; non-text blocks surface as labeled markers. Misconfiguration fails at
-  build time. All of it still rides `dispatch()`.
+  build time. All of it still rides `dispatch()`. The SDK transports run in anyio task groups, so ANY
+  error leaves them as an `ExceptionGroup`; `McpTool.run` unwraps it (`unwrap_error`: validation leaf
+  first, then any ordinary exception, never a cancellation) and re-raises the REAL cause typed — so a bad
+  argument is `kind=validation` and a tool error shows its own message, never "unhandled errors in a
+  TaskGroup". Don't catch ExceptionGroup in dispatch; keep the unwrap at the adapter edge.
+- **Security & telemetry posture (`docs/concepts/security-and-telemetry.md`) — don't regress these.**
+  (1) THIRD-PARTY TELEMETRY IS OFF unless deliberately allowed: `build_graph` calls
+  `tracing.guard_third_party_telemetry()` which forces `LANGSMITH_TRACING`/`LANGCHAIN_TRACING_V2`/
+  `LANGCHAIN_TRACING` to false with a warning (opt-in `ALLOW_LANGSMITH_TRACING=true`); the LiteLLM adapter
+  imports through `_hardened_litellm()` (`LITELLM_LOCAL_MODEL_COST_MAP=True` set BEFORE import,
+  `telemetry=False`, `turn_off_message_logging=True`, `suppress_debug_info=True`); the Databricks shell and
+  the MLflow tracer set `MLFLOW_DISABLE_TELEMETRY`/`DO_NOT_TRACK` before importing mlflow. OpenTelemetry
+  exports only where `OTEL_EXPORTER_OTLP_ENDPOINT` points. (2) RETRIEVED EVIDENCE IS FENCED AS UNTRUSTED
+  by the engine (`nodes.untrusted_block`) for generate, refine AND the judge — every pack, no prompt edits;
+  a value can't close the fence. `act.md`/`plan.md`/`replan.md`/`reformulate.md` say results are DATA.
+  (3) PER-REQUEST INSTRUCTIONS NEVER REACH THE JUDGE (`Runtime.instructions_for(s, judge=True)` = file
+  instructions only) — the judge is a control, not caller-configurable. (4) CONFIG→SQL/PATH BOUNDARIES:
+  pack-declared `view`/`metric_view` are validated as dotted object names (`_sql_object_name`) because
+  they are interpolated into SQL; `use_case` is validated as a folder name (`packs.check_pack_name`).
+  (5) DEPENDENCIES — two layers. INTENT files, all pinned `==`: `requirements.txt` (default),
+  `requirements-optional.txt` (opt-in adapters, declared + audited, not installed), `requirements-dev.txt`
+  (CI tooling), `engine/platform_snowflake/requirements.txt` (image). LOCKS, fully resolved (every
+  TRANSITIVE pinned): `requirements.lock.txt` (universal, Python ≥3.11; what to install) and
+  `engine/platform_snowflake/requirements.lock.txt` (linux/3.11, **hashed**; the Dockerfile installs it with
+  `--require-hashes`). Regenerate with the `uv pip compile` command in each lock's header after ANY intent
+  change — `tests/test_dependency_policy.py` fails a stale lock. It also enforces **declare what you import**
+  (every third-party module imported by `engine/` or a runner, INCLUDING lazy in-function imports —
+  `requests`/`urllib3` are direct imports, not transitive), **pin what you declare** (`==` everywhere, shared
+  packages equal, eager imports in the DEFAULT file) and an explicit pin for security-relevant transitives
+  (`starlette` serves the endpoint; fastapi only bounds it `>=0.46`, so an existing env sat on a version
+  with five advisories while a fresh resolve looked clean). Add a new dependency = map it in `IMPORT_TO_DIST`
+  + declare it + regenerate, or that test fails. CI installs the LOCK, runs pytest, audits the INSTALLED env
+  (`pip-audit` with no `-r`) plus every lock and intent file (weekly too), and emits a CycloneDX SBOM; the
+  SPCS image runs as a non-root user. Bump pins deliberately (upgrade → `pytest -q` → re-pin → regenerate);
+  `tests/test_tools_mcp_real_sdk.py` exercises the REAL pinned `mcp` SDK (a FastMCP stdio subprocess
+  through `McpTool` + `dispatch()`), so an `mcp` bump is proven, not assumed.
 - **The core's shape (post-redesign; see `docs/design/target-design.md`).** `graph.py` is ONLY a
   composition root; nodes live in `nodes.py` as functions of an explicit `Runtime` (add a dependency to
   `Runtime`, never a closure). Retrieval is ONE abstraction: a `Retriever` strategy returning a typed

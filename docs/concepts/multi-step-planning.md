@@ -119,13 +119,18 @@ models:
 Prompts (shared, pack-overridable by file presence): `shared/prompts/plan.md`, `shared/prompts/replan.md`.
 Synthesis reuses the pack's normal `generate.md`.
 
-**The planner's token budget (`PLAN_MAX_TOKENS`, default 8192).** A DAG is one large structured
-generation, and live planned runs failed with `output truncated (hit max_tokens)` under the general
-`LLM_MAX_TOKENS` cap (4096). The plan call therefore asks for its **own** cap — `PLAN_MAX_TOKENS`, never
-below `LLM_MAX_TOKENS` — passed per call (`complete(prompt, max_tokens=…)`; every adapter honors it, the
-other calls are unchanged). A cap is a ceiling, not a spend. If a plan still truncates, the run
-escalates with an actionable reason (`planner output truncated at N tokens; raise PLAN_MAX_TOKENS, trim
-plan_skills, or lower max_plan_steps`) instead of the generic message.
+**Token budgets — the plan call AND the synthesis call.** Two generations on this path are long: the
+DAG (one large structured object) and the **synthesis** that follows it (an answer over everything the
+steps gathered — e.g. a classification of dozens of positions). Both overran the old 4096 default live.
+So: (1) the general ceiling `LLM_MAX_TOKENS` now defaults to **8192** (a cap is a ceiling, not a spend;
+lower it only for a model with a smaller output limit); (2) the plan call asks for its **own** cap,
+`PLAN_MAX_TOKENS` (default 8192, never below the general one), passed per call
+(`complete(prompt, max_tokens=…)` — every adapter honors it); (3) a pack whose answers are long can
+declare **`max_output_tokens:`** in its `config.yaml`, which the engine applies to its `generate` and
+`refine` calls — pack-level, no global env change. If a plan still truncates, the run escalates with an
+actionable reason (`planner output truncated at N tokens; raise PLAN_MAX_TOKENS, trim plan_skills, or
+lower max_plan_steps`); a truncated synthesis raises naming both `LLM_MAX_TOKENS` and
+`max_output_tokens`.
 
 **Plan-generation latency.** The plan is on the critical path and is a *schema-following* task, not a
 reasoning one — so the cheapest lever is a **separate, faster planner model**: `models.planner` (or

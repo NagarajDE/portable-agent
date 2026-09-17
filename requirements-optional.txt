@@ -1,0 +1,22 @@
+# OPT-IN adapters: NOT installed by default, but declared and PINNED here so they are covered by the
+# dependency policy and by CI's pip-audit. Install the block you actually use:
+#     pip install -r requirements-optional.txt          # all of them
+#     pip install anthropic==1.6.0                      # or just one
+#
+# These versions were RESOLVED (current releases for Python 3.11), not exercised by the offline suite --
+# every one of them is lazy-imported, so no test touches them. Re-pin from `pip freeze` once you run a
+# deployment on them. Policy + audit log: docs/concepts/security-and-telemetry.md §3.
+
+# --- direct Anthropic provider (WORKER_PROVIDER=anthropic). The `litellm` gateway reaches Anthropic too,
+#     so this is only for a deployment that wants the vendor SDK itself. ---
+anthropic==1.6.0
+
+# --- observability: install ONLY if you set TRACER=otel (the default TRACER=stdout needs nothing) ---
+# Exports to OTEL_EXPORTER_OTLP_ENDPOINT if set, else prints spans to the console. No third-party telemetry.
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+
+# --- only needed to DEPLOY on Databricks (MLflow Models-from-Code + agents.deploy) ---
+# MLflow's usage telemetry is pinned OFF by the Databricks shell (MLFLOW_DISABLE_TELEMETRY / DO_NOT_TRACK).
+mlflow==3.16.1
+databricks-agents==1.12.0

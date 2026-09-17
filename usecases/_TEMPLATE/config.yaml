@@ -32,6 +32,11 @@ loop: true
 #   planner:   { provider: cortex,     model: "claude-haiku-4-5" }  # tool_mode: planned only; unset = worker plans
 #   # databricks needs an explicit serving-endpoint name (no default); litellm needs a "provider/model" string.
 
+# OPTIONAL output-token ceiling for THIS pack's answers (generate + refine) when they are long -- e.g. a
+# multi-step synthesis listing many positions. Unset = the deployment default LLM_MAX_TOKENS (8192).
+# A ceiling, not a spend; a truncated answer raises rather than passing a cut-off reply.
+# max_output_tokens: 16000
+
 # OPTIONAL term->value binding (Cortex only; no-op on mock). Profiles the view's LOW-cardinality
 # dimensions once and hands their REAL values to framing, so a user's word binds to the exact stored
 # spelling on the first try. Recovery from a wrong value on ANY column is automatic regardless.

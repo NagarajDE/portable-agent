@@ -158,6 +158,20 @@ def test_genie_through_the_sql_retriever_recovers_values_on_a_blank(monkeypatch)
     assert RECOVERY_HEADER in block and "status: Executed, Approved" in block
 
 
+def test_missing_databricks_sdk_is_an_actionable_error(monkeypatch):
+    """IMPROVEMENT 3 (live): SQL_TOOL=genie without databricks-sdk must name Genie + the package, not die
+    with a bare ModuleNotFoundError."""
+    import sys
+    import engine.llm_client as L
+    monkeypatch.setitem(sys.modules, "databricks", None)          # simulate an env without the SDK
+    monkeypatch.setitem(sys.modules, "databricks.sdk", None)
+    monkeypatch.setattr(L, "_ws_client", None)
+    with pytest.raises(ImportError) as e:
+        GenieTool({"genie_space": "sp"})                          # no injected client -> real SDK path
+    msg = str(e.value)
+    assert "Genie" in msg and "pip install databricks-sdk" in msg and "SQL_TOOL=genie" in msg
+
+
 def test_workspace_client_normalizes_host_and_is_memoized(monkeypatch):
     import sys, types
     import engine.llm_client as L

@@ -1,0 +1,50 @@
+# CI: offline tests + dependency vulnerability audit + SBOM. No credentials, no live calls.
+name: ci
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"          # weekly: new advisories against the SAME pins get caught
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip
+      # Install the LOCK (every transitive pinned), not a fresh resolve -- so what is tested is what ships.
+      # It is derived from requirements.txt alone, so an undeclared direct import still fails collection here.
+      - run: pip install -r requirements.lock.txt -r requirements-dev.txt
+      - run: pytest -q                     # the live smokes (tests/live) skip without LIVE_SMOKE=1
+      # Audit the INSTALLED environment -- the set that actually runs -- not only the files.
+      - run: pip-audit --strict
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt
+      # 1) The LOCKS: fully pinned, so they are audited WITHOUT invoking pip (--disable-pip): no resolution,
+      #    no build, host-independent -- the image lock is linux/x86_64-only and must be auditable anywhere.
+      #    (Its hashes are enforced where they matter: `pip install --require-hashes` in the Dockerfile.)
+      - run: pip-audit -r requirements.lock.txt --no-deps --disable-pip --strict
+      - run: pip-audit -r engine/platform_snowflake/requirements.lock.txt --no-deps --disable-pip --strict
+      # 2) The INTENT files, freshly resolved: catches a transitive that now needs a newer version than the
+      #    lock carries (i.e. "regenerate the lock").
+      - run: pip-audit -r requirements.txt --strict
+      - run: pip-audit -r requirements-optional.txt --strict
+      - run: pip-audit -r requirements-dev.txt --strict
+      - run: pip-audit -r engine/platform_snowflake/requirements.txt --strict
+      # SBOM (CycloneDX) of the locked dependency set, kept as a build artifact for supply-chain review.
+      - run: pip install -r requirements.lock.txt
+      - run: cyclonedx-py environment --output-format json --outfile sbom.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json

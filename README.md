@@ -21,6 +21,10 @@ Host on Databricks with one shell file.
 > Access control — who can call an agent, what it can read, and the per-user RLS end goal:
 > [`docs/concepts/access-control.md`](docs/concepts/access-control.md).
 >
+> Security & telemetry — what each dependency phones home (and how it's pinned off), the
+> prompt-injection trust boundaries, and the dependency/SBOM/audit policy:
+> [`docs/concepts/security-and-telemetry.md`](docs/concepts/security-and-telemetry.md).
+>
 > Tools and agents — the generic tool layer (SQL is one tool of many), its safety model, agentic
 > mode + MCP, and how to add a tool-using pack: [`docs/concepts/tools-and-agents.md`](docs/concepts/tools-and-agents.md).
 >
@@ -135,7 +139,7 @@ A new agent's real cost: one persona file + its own tuning. Everything else inhe
 ## Run it now (no credentials)
 
 ```
-pip install langgraph pyyaml
+pip install -r requirements.lock.txt       # the lock: every transitive pinned (`-r requirements-optional.txt` adds opt-in adapters)
 python run_local.py                        # dq_qals: 12→14→16→18
 python run_local.py parity_hana_snowflake
 python run_evals.py                        # golden set pass/fail

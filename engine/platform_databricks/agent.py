@@ -25,6 +25,10 @@ os.environ.setdefault("USE_CASE", "dq_qals")
 os.environ.setdefault("WORKER_PROVIDER", "databricks")     # Foundation Model API
 os.environ.setdefault("SQL_TOOL", "genie")              # Genie as text-to-SQL
 os.environ.setdefault("TRACER", "stdout")               # JSON events -> serving logs; set TRACER=mlflow for spans
+# MLflow usage telemetry (MLflow >= 3.x phones home anonymized usage events): OFF unless the operator
+# opts in. Both switches MLflow honors, set BEFORE the import (they are read at import time).
+os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")
+os.environ.setdefault("DO_NOT_TRACK", "true")
 
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import ResponsesAgentRequest, ResponsesAgentResponse

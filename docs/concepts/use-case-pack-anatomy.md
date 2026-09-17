@@ -32,6 +32,9 @@ Copy `usecases/_TEMPLATE/` to start — it's a runnable minimal pack. See sectio
   (below), and optionally `tools:`, scoring (`max_score`, `pass_score`/`threshold`), `max_iters`,
   `eval_retries`, `max_stall`, `max_data_retries`, `zero_is_no_data`, `exclude_shared_skills:`
   (section 4), and `frame_query` / `frame_skills` (below).
+  - **`max_output_tokens`** (optional, 256..200000) — the output-token ceiling for this pack's `generate`
+    and `refine` calls, when its answers are long (a multi-step synthesis listing many positions). Unset →
+    the deployment default `LLM_MAX_TOKENS` (8192). A ceiling, not a spend.
   - **`loop`** (default **off**) — `loop: true` turns on the evaluate→refine loop (scored answers). Without
     it the run is `generate → END`: retrieval / multi-step gathering, framing, reformulation and the no-data
     escalation all still run, but the worker's answer is final and **unscored** (`score: None`,
