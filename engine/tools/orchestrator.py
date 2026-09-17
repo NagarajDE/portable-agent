@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from engine.sql_tool import no_data          # shared blank-retrieval sentinel (stdlib-only module: no cycle)
+from engine.sql_tool import no_data, is_no_data   # shared blank-retrieval sentinel (stdlib-only: no cycle)
 from engine.tools.base import ToolContext, Tool
 from engine.tools.dispatch import dispatch
 from engine.tools.registry import build_tool
@@ -111,8 +111,8 @@ def gather_context(task: str, loaded: list[LoadedTool], run_id: str = "-") -> st
         if not lt.tool.spec.read_only:                # least privilege: never auto-run writes
             continue
         result = dispatch(lt.tool, _render(lt.input_template, task), ctx)
-        if result.ok and (result.output or "").strip():
-            blocks.append(f"[{lt.label}]\n{result.output}")
+        if result.ok and (result.output or "").strip() and not is_no_data(result.output):
+            blocks.append(f"[{lt.label}]\n{result.output}")   # a NO_DATA sentinel is NOT evidence
             usable += 1
         elif result.ok:                                # ran fine, said nothing -> not evidence
             blocks.append(f"[{lt.label}] (no output)")

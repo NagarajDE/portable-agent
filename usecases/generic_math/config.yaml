@@ -1,0 +1,20 @@
+# Example pack (generic, NON AI+BI): a TOOLLESS agent whose Databricks access goes THROUGH the LiteLLM
+# gateway (provider: litellm, model: databricks/<endpoint>). Its counterpart, `generic_joke`, reaches
+# the SAME Databricks endpoint via the NATIVE adapter (provider: databricks) -- the two packs together
+# show the two ways to reach Databricks, worker-side, judged by the same Cortex evaluator.
+#   tools: []          -> ToollessRetriever: the worker generates, the evaluator judges, no data step.
+#   worker -> Databricks via LiteLLM        evaluator -> Cortex
+# To run the worker (LiteLLM -> Databricks) provide:
+#   DATABRICKS_API_KEY=<dapi-token>
+#   DATABRICKS_API_BASE=https://<workspace>.cloud.databricks.com/serving-endpoints   # must end /serving-endpoints
+inherits: [shared]
+name: "Generic example: 4th-grade math question (worker=litellm/databricks, eval=cortex)"
+sample_task: "Generate one original math word problem appropriate for a 4th grader, then give the final numeric answer."
+
+tools: []                              # -> ToollessRetriever: no SQL, no semantic layer, never escalates
+exclude_shared_skills: [sql_safety]    # no SQL here
+
+# Per-pack provider/model (env WORKER_*/EVAL_* still override; WORKER_PROVIDER=mock runs offline).
+models:
+  worker:    { provider: litellm, model: "databricks/databricks-gpt-6-astra" }   # LiteLLM route to Databricks
+  evaluator: { provider: cortex,  model: "claude-opus-4-8" }

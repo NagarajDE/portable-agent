@@ -6,6 +6,11 @@ sample_task: "What are the top 10 vendors by spend, and what % of total does eac
 # A lone all-zero/NULL row is a filter that matched nothing (SUM over no rows), never a real spend
 # figure -- escalate it as no_data rather than scoring an "it's NULL" answer.
 zero_is_no_data: true
+# Provider/model DEFAULTS (env WORKER_*/EVAL_* still wins; WORKER_PROVIDER=mock runs on the fixtures).
+models:
+  worker:    { provider: cortex, model: "claude-opus-5" }
+  evaluator: { provider: cortex, model: "claude-opus-4-8" }
+value_catalog: { max_cardinality: 25 }
 # Use the pack skills to make the question precise BEFORE the Analyst call, so a "for the <name> category"
 # question is bound to ExecutiveCategory instead of the wrong column. frame_skills scopes framing to the
 # value->column map (see skills/dimension_map.md); the other skills stay for answer synthesis.

@@ -14,3 +14,19 @@ sample_task: "What is the total value across items?"
 
 # This template is a single-SQL agent (no `tools:` key -> legacy SQL path). For a NON-SQL agent,
 # declare tools: here and add  exclude_shared_skills: [sql_safety]  so SQL rules aren't injected.
+
+# OPTIONAL provider/model DEFAULTS for this pack. Providers: mock | cortex | databricks | litellm
+# (case-insensitive). Env WORKER_PROVIDER/WORKER_MODEL/EVAL_PROVIDER/EVAL_MODEL always WINS -- leave
+# them unset for the pack to apply. Judge with a DIFFERENT model than the worker (self-grading blind spot).
+# models:
+#   worker:    { provider: cortex,     model: "claude-opus-5" }
+#   evaluator: { provider: cortex,     model: "claude-opus-4-8" }
+#   # databricks needs an explicit serving-endpoint name (no default); litellm needs a "provider/model" string.
+
+# OPTIONAL term->value binding (Cortex only; no-op on mock). Profiles the view's LOW-cardinality
+# dimensions once and hands their REAL values to framing, so a user's word binds to the exact stored
+# spelling on the first try. Recovery from a wrong value on ANY column is automatic regardless.
+# value_catalog: { max_cardinality: 25 }
+
+# OPTIONAL business glossary: put term -> meaning -> maps_to entries in glossary.yaml (see the example
+# in this folder); shared/glossary.yaml entries are inherited, and a pack entry overrides a shared one.

@@ -1,0 +1,7 @@
+# SHARED business glossary -- terms that mean the same thing for EVERY pack. Keep it small: a term
+# belongs here only when >=2 packs want the identical definition (same rule as shared skills). A pack's
+# own glossary.yaml can ADD terms or OVERRIDE any of these by term. Format: term / aliases / meaning / maps_to.
+- term: "fiscal year"
+  aliases: ["FY"]
+  meaning: "The company's financial reporting year (not the calendar year); FY26 = fiscal 2026."
+  maps_to: "the FISCAL_* / fiscal-period fields the semantic model exposes, never a calendar-year filter"

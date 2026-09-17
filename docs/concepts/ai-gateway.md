@@ -50,6 +50,19 @@ is: `mock` (zero-cred) · `cortex` (Snowflake-native) · `litellm` (everything e
 old `DatabricksClient` is superseded → prefer `provider: litellm, model: databricks/<endpoint>` (kept
 for back-compat).
 
+## Cortex through LiteLLM (optional) — two routes, one credential each
+Native `provider: cortex` is the default for Cortex and needs only the PAT (it shares the Snowpark
+session with Cortex Analyst). Routing Cortex *through* LiteLLM is optional and never needed for a PAT:
+- **PAT via the OpenAI-compatible endpoint:** `provider: litellm, model: "openai/<cortex-model>"`,
+  `LITELLM_BASE_URL=https://<account>.snowflakecomputing.com/api/v2/cortex/<openai-compatible-path>`,
+  `OPENAI_API_KEY=<PAT>` (sent as the bearer). `LiteLLMClient` passes `api_base` through unchanged —
+  no code change. *The exact OpenAI-compatible path must be confirmed live against your account.*
+- **JWT / key-pair:** only for LiteLLM's native `snowflake/` provider — `provider: litellm,
+  model: "snowflake/<model>"` with `SNOWFLAKE_JWT` + `SNOWFLAKE_ACCOUNT_ID`. Not required otherwise.
+Either way LiteLLM-routed Cortex does **not** share the Snowpark session with `CortexAnalystTool`, so
+keep native `provider: cortex` for data / AI+BI packs; use the LiteLLM route only where you want one
+gateway for a non-data agent or central governance.
+
 ## Memory seam (later)
 Per-user/tier routing (premium user → stronger model) reads a per-request profile into `models:` /
 the LiteLLM Router; needs identity + memory, so out of scope now.

@@ -162,6 +162,8 @@ class CortexAnalystTool:
                            "in the pack's semantic_layer.yaml needs `view:` (a native Semantic View) "
                            "or `model_file:` (a stage YAML).")
         self._view = view                                            # "" when using model_file (no TVF)
+        self.last_sql = ""                                           # the SQL Analyst last generated (for auto value binding)
+        self._dims_cache: list[str] | None = None
         from engine.llm_client import snowpark_session
         self._s = snowpark_session()                                 # runs the generated SQL
 
@@ -190,12 +192,40 @@ class CortexAnalystTool:
             texts = [c.get("text", "") for c in content if c.get("type") == "text"]
             return no_data("\n".join(t for t in texts if t) or "Cortex Analyst returned no SQL.")
         sql = _ensure_read_only(sql)                                 # backstop: SELECT-only, single statement
+        self.last_sql = sql                                          # so a blank can be diagnosed by its predicates
         max_rows = max(1, int(os.getenv("SQL_MAX_ROWS", "100")))     # how many result rows the LLM sees
         timeout = max(1, int(os.getenv("SQL_TIMEOUT_SECONDS", "30")))  # >=1: timeout=0 must not remove the bound
         rows = self._s.sql(sql).limit(max_rows + 1).collect(         # cap BEFORE collect() to bound memory
             statement_params={"STATEMENT_TIMEOUT_IN_SECONDS": str(timeout)})
         text = _rows_to_text(rows[:max_rows])
         return text + ("\n... (additional rows omitted)" if len(rows) > max_rows else "")
+
+    def dimension_paths(self) -> list[str]:
+        """OPTIONAL discovery capability: every dimension of the semantic view as a `TABLE.DIM` path, from
+        `DESCRIBE SEMANTIC VIEW` (cached). Lets the engine resolve a bare column seen in a failed predicate
+        to a dimension it can look up -- no hand-declared list needed. Parsed DEFENSIVELY (column names of
+        DESCRIBE output vary by release): any failure, or a model_file pack, -> [] and the caller degrades
+        to hand-declared dims / skills-only binding."""
+        if self._dims_cache is not None:
+            return self._dims_cache
+        paths: list[str] = []
+        if self._view:
+            try:
+                rows = self._s.sql(f"DESCRIBE SEMANTIC VIEW {self._view}").collect()
+                for r in rows:
+                    d = {str(k).lower(): v for k, v in r.as_dict().items()}
+                    kind = str(d.get("object_kind") or d.get("kind") or d.get("object_type") or "").upper()
+                    if "DIMENSION" not in kind:
+                        continue
+                    name = d.get("object_name") or d.get("name") or d.get("dimension")
+                    parent = (d.get("parent_entity") or d.get("table") or d.get("logical_table")
+                              or d.get("parent") or d.get("table_name"))
+                    if name and parent:
+                        paths.append(f"{parent}.{name}")
+            except Exception:
+                paths = []
+        self._dims_cache = paths
+        return paths
 
     def distinct_values(self, dim_paths, limit: int = 50) -> dict:
         """OPTIONAL discovery capability for skill-informed FRAMING: return the distinct values of each

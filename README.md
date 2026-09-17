@@ -61,7 +61,10 @@ Every top-level entry, labeled — so it's obvious at a glance what's code and w
 
 ```
 engine/                       ← GENERIC. shared code. touch rarely.
-  graph.py                    loop + tier composition (inherit / override / concat)
+  graph.py                    composition root: validate config → build deps → wire the loop
+  nodes.py · retrieval.py     the loop's nodes; one typed Retrieval + retrieval strategies
+  config.py · packs.py        typed PackConfig; reading/composing a pack (inherit / override / concat)
+  verdict.py · guards.py      validated judge verdict; deterministic reformulation guards
   llm_client.py               LLMClient + mock|anthropic|cortex|databricks
   sql_tool.py                 SQLTool  + mock|cortex-analyst|genie
   platform_databricks/agent.py   the ONLY Databricks-specific file

@@ -1,0 +1,23 @@
+# Example pack (generic, NON AI+BI): a TOOLLESS agent whose Databricks access uses the NATIVE Databricks
+# adapter (provider: databricks). Its counterpart, `generic_math`, reaches the SAME Databricks endpoint
+# via the LiteLLM gateway (provider: litellm, model: databricks/<endpoint>) -- the two packs together
+# show the two ways to reach Databricks, worker-side, judged by the same Cortex evaluator.
+#   tools: []          -> ToollessRetriever: the worker generates, the evaluator judges, no data step.
+#   worker -> Databricks (NATIVE adapter)   evaluator -> Cortex
+# The native Databricks adapter needs:
+#   DATABRICKS_HOST=https://<workspace>.cloud.databricks.com   (https origin; a path is ignored)
+#   DATABRICKS_TOKEN=<dapi-token>
+# Want Databricks as the EVALUATOR instead (mix reversed)? swap the two models below:
+#   worker:    { provider: cortex,     model: "claude-opus-5" }
+#   evaluator: { provider: databricks, model: "databricks-gpt-6-astra" }
+inherits: [shared]
+name: "Generic example: short joke (worker=databricks native, eval=cortex)"
+sample_task: "Write one short, original, family-friendly joke in English."
+
+tools: []                              # -> ToollessRetriever: no SQL, no semantic layer, never escalates
+exclude_shared_skills: [sql_safety]    # no SQL here
+
+# Per-pack provider/model (env WORKER_*/EVAL_* still override; WORKER_PROVIDER=mock runs offline).
+models:
+  worker:    { provider: databricks, model: "databricks-gpt-6-astra" }   # NATIVE adapter (DATABRICKS_HOST + DATABRICKS_TOKEN)
+  evaluator: { provider: cortex,     model: "claude-opus-4-8" }

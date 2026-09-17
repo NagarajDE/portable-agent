@@ -111,14 +111,15 @@ def test_toolless_pack_uses_neither_tools_nor_sql(monkeypatch):
 
 def test_tools_run_once_in_generate_not_per_refine(monkeypatch):
     # L4: tools are gathered ONCE (in generate); refine must NOT re-run them
+    import engine.retrieval as _retrieval               # the deterministic strategy owns the gather seam
     calls = {"n": 0}
-    real = _graph_mod.gather_context
+    real = _retrieval.gather_context
 
     def counting(task, loaded, run_id="-"):
         calls["n"] += 1
         return real(task, loaded, run_id)
 
-    monkeypatch.setattr(_graph_mod, "gather_context", counting)
+    monkeypatch.setattr(_retrieval, "gather_context", counting)
     monkeypatch.setattr(_graph_mod, "load_config", lambda uc: _tools_cfg(max_iters=2))
     worker = _Seq("A0", "A1", "A2")
     judge = _Seq("SCORE: 12/18 - low")                        # never passes -> refines to max_iters

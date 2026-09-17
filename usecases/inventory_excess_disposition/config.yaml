@@ -23,3 +23,7 @@ tools:
 plan_skills: [disposition_plan.md]
 # A lone all-zero/NULL row means a filter matched nothing, never a real excess figure -> escalate it.
 zero_is_no_data: true
+# Provider/model DEFAULTS (env WORKER_*/EVAL_* still wins; WORKER_PROVIDER=mock runs on the fixtures).
+models:
+  worker:    { provider: cortex, model: "claude-opus-5" }
+  evaluator: { provider: cortex, model: "claude-opus-4-8" }

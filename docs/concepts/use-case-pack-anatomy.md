@@ -224,6 +224,47 @@ committed, never in a pack file.
 
 ---
 
+## 5b. Per-pack provider/model, the business glossary, and term→value binding
+
+### Provider/model defaults (`models:`)
+A pack may declare which provider/model its worker and judge use. Env always wins (that's the
+one-env-var migration flip), so leave `WORKER_*`/`EVAL_*` unset for the pack's block to apply:
+```yaml
+models:
+  worker:    { provider: cortex, model: "claude-opus-5" }
+  evaluator: { provider: cortex, model: "claude-opus-4-8" }   # judge with a DIFFERENT model
+```
+Providers: `mock | cortex | databricks | litellm` (case-insensitive). `databricks` needs an explicit
+serving-endpoint model (no default); `litellm` needs a `provider/model` string. Precedence per role:
+env `WORKER_MODEL`/`EVAL_MODEL` > pack `models:` > the provider's built-in default. The AI+BI packs
+ship Cortex defaults; `WORKER_PROVIDER=mock SQL_TOOL=mock` runs any of them on fixtures.
+
+### Business glossary (`glossary.yaml`)
+What a business term MEANS and HOW IT MAPS to the data. Two scopes, merged **by term, pack wins**:
+`shared/glossary.yaml` (only terms every pack defines identically) + `usecases/<pack>/glossary.yaml`.
+```yaml
+- term: "active contract"
+  aliases: ["live contract", "in-force"]
+  meaning: "A signed contract currently in force."
+  maps_to: "BUSINESS_STATUS IN ('Executed', 'Approved')"
+```
+It reaches **both** the query side (framing / planning) and the answer side (generate / refine) by
+riding on the skills text — no prompt changes. Absent → nothing injected.
+
+### Term→value binding — hybrid, never hand-author every column
+The class of bug: "active" isn't a stored value (`Executed`/`Approved` are) → 0 rows → `no_data`. A
+100–200-column view can't be hand-enumerated, so binding is layered, cheapest-first:
+1. **Hand-declared few** — `frame_skills` / `dimension_map.md` / the glossary for the high-value,
+   ambiguous columns (deliberate, not exhaustive). `recover_value_dims:` names dims to look up first.
+2. **Low-cardinality value catalog** (opt-in, `value_catalog: {max_cardinality: 25}`) — the view's
+   dimensions are profiled once (`DESCRIBE SEMANTIC VIEW`, Cortex only), those with ≤N distinct values
+   are handed to **framing** as authoritative stored values, so the first try binds correctly.
+   High-cardinality dims (names, ids) are skipped automatically.
+3. **Auto recovery from the failed predicate** (always on) — on an empty result the engine reads the
+   SQL Analyst actually ran, extracts its `col = 'literal'` / `col IN (...)` columns, resolves them to
+   the view's dimensions, looks up their real values, and feeds the **reformulate** step. No list needed.
+Mock packs degrade to (1) — the Cortex capabilities are duck-typed and optional.
+
 ## 6. Add a new agent — checklist
 
 1. Copy `usecases/_TEMPLATE/` to `usecases/<your_pack>/` (includes `__init__.py`).

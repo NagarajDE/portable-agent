@@ -7,6 +7,15 @@ sample_task: "What is the total active contract value by supplier for the top 10
 # A lone all-zero/NULL row is a filter that matched nothing (a supplier/status that isn't there), never
 # a real contract figure -- escalate it as no_data rather than scoring an "it's NULL" answer.
 zero_is_no_data: true
+# Provider/model DEFAULTS for this pack (env WORKER_*/EVAL_* still wins -- leave them unset for these
+# to apply; set WORKER_PROVIDER=mock to run on the fixtures). An AI+BI pack is Cortex-native.
+models:
+  worker:    { provider: cortex, model: "claude-opus-5" }
+  evaluator: { provider: cortex, model: "claude-opus-4-8" }
+# Term->value binding: profile the view's LOW-cardinality dimensions once (e.g. BUSINESS_STATUS) and hand
+# the REAL stored values to framing, so "active" binds to Executed/Approved on the FIRST try. Auto
+# recovery from the failed predicate still covers any column this misses. Cortex only; no-op on mock.
+value_catalog: { max_cardinality: 25 }
 # Skill-informed framing (first try): the OPTIONAL note (frame_skills) hints which column a value lives in.
 frame_query: true
 frame_skills: [dimension_map.md]

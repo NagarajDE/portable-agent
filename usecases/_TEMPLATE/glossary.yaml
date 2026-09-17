@@ -1,0 +1,8 @@
+# OPTIONAL business glossary for this pack (delete this file if you don't need one).
+# Each entry: what a business term MEANS and HOW IT MAPS to the data. Merged with shared/glossary.yaml by
+# term -- a pack entry OVERRIDES a shared one with the same term. Consulted by query framing (so the term
+# binds to the right column/values) and by the answer step (so the term is interpreted correctly).
+- term: "example term"
+  aliases: ["synonym one", "synonym two"]
+  meaning: "One sentence: what this term means in this business."
+  maps_to: "COLUMN_NAME = 'stored value'   # or a measure / a rollup rule"

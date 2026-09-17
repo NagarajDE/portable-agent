@@ -1,0 +1,13 @@
+# Business glossary for inventory analytics. Pack entries override shared/glossary.yaml.
+- term: "excess"
+  aliases: ["excess stock", "excess inventory", "overstock"]
+  meaning: "Stock held above the suggested maximum inventory level."
+  maps_to: "qty = current stock - max inventory level; value = TOTAL_EXCESS_STOCK_VALUE"
+- term: "weeks on hand"
+  aliases: ["WOH", "coverage", "weeks of supply"]
+  meaning: "The default coverage metric: how many weeks current stock lasts at the consumption rate (external)."
+  maps_to: "the WeeksOnHand* measures"
+- term: "current"
+  aliases: ["latest", "as of today", "right now"]
+  meaning: "The most recent inventory snapshot, not a trend."
+  maps_to: "MostRecentSnapshot = TRUE (a scope default for the answer step; framing must not inject it)"

@@ -1,0 +1,13 @@
+# Business glossary for procurement contracts (iCertis). Pack entries override shared/glossary.yaml.
+- term: "active contract"
+  aliases: ["live contract", "in-force contract", "active"]
+  meaning: "A signed contract currently in force."
+  maps_to: "BUSINESS_STATUS IN ('Executed', 'Approved')   # NOT the literal 'Active' -- it is not a stored value"
+- term: "contract value"
+  aliases: ["total contract value", "TCV"]
+  meaning: "The amendment-aware value of a contract."
+  maps_to: "UPDATED_CONTRACT_VALUE when present, else CONTRACT_VALUE (COALESCE(UPDATED_CONTRACT_VALUE, CONTRACT_VALUE))"
+- term: "supplier"
+  aliases: ["vendor", "counterparty"]
+  meaning: "The contracting counterparty; roll up subsidiaries to the parent when asked for a supplier view."
+  maps_to: "PARENT_SUPPLIER_NAME (rolls up subsidiaries); SUPPLIER_NAME for the legal entity"

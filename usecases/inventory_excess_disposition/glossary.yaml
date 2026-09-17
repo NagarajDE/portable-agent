@@ -1,0 +1,13 @@
+# Business glossary for excess disposition (same inventory vocabulary as inventory_balance).
+- term: "excess"
+  aliases: ["excess stock", "excess inventory", "overstock"]
+  meaning: "Stock held above the suggested maximum inventory level."
+  maps_to: "qty = current stock - max inventory level; value = TOTAL_EXCESS_STOCK_VALUE"
+- term: "forward demand"
+  aliases: ["forecast demand", "future demand"]
+  meaning: "Expected consumption through the end of the current quarter, used to classify excess."
+  maps_to: "FORECAST_DEMAND_QTY_QTR_END_SUM"
+- term: "current"
+  aliases: ["latest", "as of today"]
+  meaning: "The most recent inventory snapshot."
+  maps_to: "MostRecentSnapshot = TRUE"

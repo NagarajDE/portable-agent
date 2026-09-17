@@ -29,7 +29,15 @@ an adapter (`engine/llm_client.py` / `engine/sql_tool.py`) or a use-case pack.
 
 ```
 engine/     GENERIC. shared code. touch rarely.
-  graph.py             the loop: generate→evaluate→refine, composes shared+pack
+  graph.py             COMPOSITION ROOT: validate config → build deps → wire the graph (State, build_graph)
+  nodes.py             the loop's nodes (generate·evaluate·refine + routers) as functions of a Runtime
+  retrieval.py         ONE typed Retrieval + Retriever strategies (sql|deterministic|agentic|planned|toolless)
+  config.py            PackConfig — typed, closed (extra=forbid), bounded pack config
+  packs.py             reading a pack: config merge, prompts, skills, instructions, exemplars, fill()
+  verdict.py           Verdict + parse_verdict (JSON-authoritative, fail-closed)
+  guards.py            rewrite_drift(): the deterministic reformulation guards
+  settings.py          the loop's deployment knobs from process env (read once, passed down)
+  output.py            opt-in declared output_schema validation (the structured-output seam)
   llm_client.py         LLMClient interface + mock|anthropic|cortex|databricks
   sql_tool.py           SQLTool  interface + mock|cortex-analyst|genie
   tools/                generic Tool layer: base(contracts)+registry+dispatch+orchestrator
@@ -358,6 +366,18 @@ in sync with `git status`.
 
 ## Conventions for this codebase specifically
 
+- **The core's shape (post-redesign; see `docs/design/target-design.md`).** `graph.py` is ONLY a
+  composition root; nodes live in `nodes.py` as functions of an explicit `Runtime` (add a dependency to
+  `Runtime`, never a closure). Retrieval is ONE abstraction: a `Retriever` strategy returning a typed
+  `Retrieval(text, empty, hint)` — the loop asks `retriever.frames_question` / `.reformulates` and never
+  branches on `tool_mode`; adding a retrieval kind = one class in `retrieval.py`, zero loop edits. The
+  `NO_DATA` sentinel is a text-adapter WIRE FORMAT interpreted in exactly one place
+  (`Retrieval.from_text`) — no other module may sniff it. **SQL always runs through `dispatch()`**
+  (the single-SQL path is wrapped, not bypassed). Pack config is `PackConfig` (`extra="forbid"`): an
+  unknown key is a build-time error, never a silent no-op — add new knobs THERE with their bounds.
+  Two opt-in loop-contract seams exist, default off: `output_schema:` (enforced shape → violation scores
+  0 and refine fixes the shape) and `judge_verify_tool:` (the judge spot-checks with one declared
+  read-only tool). `thread_id` rides on State for a future multi-turn capability.
 - Prefer plain files (`.md`, `.yaml`) over code for anything domain-specific —
   that's what keeps a pack editable by a non-engineer and diffable in git.
 - Prompt filling uses `fill()` — a **single-pass** regex replace of `{key}` (not
@@ -413,6 +433,19 @@ in sync with `git status`.
   as `no_data` rather than recovering (exempting period codes would let the period be dropped entirely,
   reintroducing the widening false-pass); and the agentic path does not yet mark a blank gather (a MOCK
   worker can't drive the ReAct protocol, so marking it would break every creds-free agentic run).
+- **Term→value binding is HYBRID and mostly automatic (`engine/binding.py`).** Never hand-author every
+  column's values. Layers, cheapest first: a pack's deliberate few (`dimension_map.md`, `glossary.yaml`,
+  `recover_value_dims`) → an opt-in LOW-cardinality **value catalog** (`value_catalog: {max_cardinality:
+  N}`; profiled once via `dimension_paths()`, injected into FRAMING as authoritative, high-cardinality dims
+  skipped) → **auto recovery from the failed predicate** (always on: `CortexAnalystTool.last_sql` →
+  `filter_columns()` → `resolve_dims()` → `distinct_values()` → the reformulate step). The Cortex
+  capabilities (`last_sql`, `dimension_paths`, `distinct_values`) are OPTIONAL duck-typed methods on the
+  SQL tool; mock degrades to skills-only. Don't add per-column value lists to skills — fix the mechanism.
+- **Business glossary (`glossary.yaml`, shared + pack, merged by term, PACK WINS)** rides on the skills
+  text into framing/planning AND generate/refine (`packs.load_glossary` / `render_glossary`). Shared holds
+  only terms every pack defines identically (same rule as shared skills).
+- **Per-pack `models:` are DEFAULTS; env still wins.** `databricks` has NO default model (explicit
+  serving-endpoint name required; `DATABRICKS_HOST` may carry a path, it's stripped, never rejected).
 - **`zero_is_no_data` is OPT-IN (default false).** A single all-zero/NULL row (`COUNT(*)=0`, `SUM=NULL`)
   is structurally a row, so the sentinel can't see it. Escalating it is only correct where 0 always means
   "a filter or status label matched nothing" — for a pack where 0 is a real answer, escalating is wrong.

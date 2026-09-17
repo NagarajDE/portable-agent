@@ -183,25 +183,37 @@ class LiteLLMClient:
         return str(text)
 
 
+def _databricks_base_url(host: str) -> str:
+    """Normalize DATABRICKS_HOST to the serving-endpoints base URL. Accepts a bare workspace origin OR one
+    that already carries a path (`.../serving-endpoints`) -- the path is stripped, not rejected. Still
+    rejects non-https, credentials-in-URL, query strings and fragments (never a token in a URL)."""
+    from urllib.parse import urlsplit
+    u = urlsplit((host or "").strip())
+    if u.scheme != "https" or not u.hostname or u.username or u.password or u.query or u.fragment:
+        raise ValueError("DATABRICKS_HOST must be an HTTPS workspace origin, e.g. "
+                         "https://<workspace>.cloud.databricks.com (a path is ignored)")
+    return f"https://{u.netloc}/serving-endpoints"
+
+
 class DatabricksClient:
     """Databricks Foundation Model API (OpenAI-compatible serving endpoint).
     NOTE: superseded by the `litellm` provider -- prefer `provider: litellm, model:
     databricks/<endpoint>` (one gateway for all providers). Kept for back-compat with existing
-    `WORKER_PROVIDER=databricks` configs; no new features go here."""
+    `WORKER_PROVIDER=databricks` configs; no new features go here.
+    The MODEL (serving-endpoint name) is REQUIRED -- from the pack's `models:` block or DATABRICKS_MODEL;
+    there is deliberately no silent default (a wrong endpoint name should fail loudly, not run)."""
     def __init__(self, model: str | None = None):
-        from urllib.parse import urlsplit
-        from openai import OpenAI
+        self._model = model or (os.getenv("DATABRICKS_MODEL") or "").strip() or None
+        if not self._model:
+            raise ValueError("databricks provider needs an explicit model (a serving-endpoint name) -- set "
+                             "the pack's models.worker.model / models.evaluator.model, or WORKER_MODEL / "
+                             "EVAL_MODEL, or DATABRICKS_MODEL; there is no default")
         token = os.getenv("DATABRICKS_TOKEN", "").strip()
-        host = os.getenv("DATABRICKS_HOST", "").strip()
         if not token:
             raise RuntimeError("DATABRICKS_TOKEN is required")
-        u = urlsplit(host)                              # reject creds-in-URL, paths, query, non-https
-        if u.scheme != "https" or not u.hostname or u.username or u.password \
-                or u.path not in ("", "/") or u.query or u.fragment:
-            raise ValueError("DATABRICKS_HOST must be an HTTPS workspace origin")
-        self._c = OpenAI(api_key=token, base_url=f"{host.rstrip('/')}/serving-endpoints",
-                         timeout=60.0, max_retries=2)
-        self._model = model or os.getenv("DATABRICKS_MODEL", "databricks-claude-sonnet-4")
+        base_url = _databricks_base_url(os.getenv("DATABRICKS_HOST", ""))
+        from openai import OpenAI                       # lazy: only when this provider is selected
+        self._c = OpenAI(api_key=token, base_url=base_url, timeout=60.0, max_retries=2)
 
     def complete(self, prompt: str, **kw) -> str:
         r = self._c.chat.completions.create(

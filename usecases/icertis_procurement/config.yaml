@@ -6,6 +6,11 @@ sample_task: "Who are the top vendors by total active SOW contract value?"
 # A lone all-zero/NULL row is a filter that matched nothing (a supplier/status that isn't there), never
 # a real contract figure -- escalate it as no_data rather than scoring an "it's NULL" answer.
 zero_is_no_data: true
+# Provider/model DEFAULTS (env WORKER_*/EVAL_* still wins; WORKER_PROVIDER=mock runs on the fixtures).
+models:
+  worker:    { provider: cortex, model: "claude-opus-5" }
+  evaluator: { provider: cortex, model: "claude-opus-4-8" }
+value_catalog: { max_cardinality: 25 }
 # Skill-informed framing: bind "active/expired" to the contract status and "contract value" to the value
 # measure before the Analyst call. frame_skills reuses the pack's column-bearing analytics skill.
 frame_query: true
